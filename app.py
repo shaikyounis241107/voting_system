@@ -1,187 +1,173 @@
 """
-SecureVote - Online Voting System  (v3)
-Tkinter + SQLite + matplotlib + Pillow
-  Voter login: V001..V005 / 1234          Admin login: admin / admin123
+SecureVote — Tkinter Voting Management System
+Features:
+- Dual image loader: Fast high-res PIL (LANCZOS) with automatic fallback to standard-library sips & Tkinter PhotoImage.
+- Transparent glassmorphic interface that seamlessly mixes with background templates in all 4 steps.
+- Step 1: Login & Landing Hero (background.png)
+- Step 2: 2FA / OTP Verification (verify.png)
+- Step 3: Candidate Official Ballot (vote.png)
+- Step 4: Ballot Confirmation Receipt & Live Audit Results (result.png)
+- Admin Panel: Real-time turnout analytics, candidate CRUD, voter search directory, CSV audit export.
+Demo voter IDs: V001–V005 | Password: 1234
+Demo admin: admin | Password: admin123
 """
+
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, messagebox, filedialog
 import sqlite3
-import csv
 import random
 import time
 import uuid
+import csv
+import hmac
+import os
+import subprocess
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
-from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 DB = "voting.db"
-OTP_LIFE = 120            # OTP valid for 120 seconds
+OTP_LIFE = 120
 
-# ---------- NEON AURORA THEME ----------
-FONT = "Avenir Next"      # falls back automatically if missing
-BG0 = "#060818"
-CARD = "#0c1030"
-FIELD = "#141a45"
-BORDER = "#2a3170"
-TEXT = "#f5f7ff"
-MUTED = "#9aa3d4"
-VIOLET = "#8b5cf6"
-PINK = "#ec4899"
-CYAN = "#22d3ee"
+# ---------- THEME PALETTE ----------
+FONT = "Avenir Next"
+BG = "#070b19"
+PANEL = "#0b1226"
+PANEL_GLASS = "#0c152e"
+FIELD = "#0c1328"
+BORDER = "#8b5cf6"
+BORDER_SUBTLE = "#1e293b"
+TEXT = "#f8f7ff"
+MUTED = "#94a3b8"
+PURPLE = "#8b5cf6"
+PURPLE_HOVER = "#a855f7"
+SKYBLUE = "#38bdf8"
+SKYBLUE_HOVER = "#0ea5e9"
+CYAN = "#2dd4bf"
+GREEN = "#4ade80"
 AMBER = "#fbbf24"
-MINT = "#34d399"
-DANGER = "#fb7185"
-CAND_COLORS = ["#8b5cf6", "#22d3ee", "#ec4899", "#fbbf24", "#34d399", "#f97316"]
-STEPS = ["Voter Login", "OTP Verification", "Cast Your Vote"]
+RED = "#fb7185"
+CORAL = "#ff8066"
+MAGENTA = "#ec4899"
+CANDIDATE_COLORS = ["#ec4899", "#8b5cf6", "#38bdf8", "#fbbf24", "#4ade80", "#ff8066"]
 
-# typography scale (keeps every screen consistent)
-H1 = (FONT, 30, "bold")
-H2 = (FONT, 16, "bold")
-BODY = (FONT, 13)
-SMALL = (FONT, 11)
-CAPTION = (FONT, 10, "bold")
-
-CARD_W, CARD_H = 940, 600
-HERO_W = 340
+_IMAGE_CACHE = {}
 
 
-# ---------- COLOUR / IMAGE HELPERS ----------
-def hex2rgb(c):
-    return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+def load_image_tk(filename, width=1280, height=820):
+    """
+    Intelligent image loader:
+    1. Uses PIL if available for instantaneous, ultra-crisp Lanczos scaling.
+    2. Falls back to standard-library sips / tk.PhotoImage if PIL is missing.
+    3. Searches multiple extension & plural variants (e.g. result.png / results.png).
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base_name, _ = os.path.splitext(filename)
+
+    variations = [base_name]
+    if base_name == "result":
+        variations.append("results")
+    elif base_name == "results":
+        variations.append("result")
+
+    candidates = [
+        os.path.join(script_dir, filename),
+        os.path.join(os.getcwd(), filename),
+    ]
+    for var in variations:
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            candidates.append(os.path.join(script_dir, var + ext))
+            candidates.append(os.path.join(os.getcwd(), var + ext))
+
+    found_path = None
+    for p in candidates:
+        if os.path.isfile(p):
+            found_path = p
+            break
+
+    if not found_path:
+        return None
+
+    cache_key = (found_path, width, height)
+    if cache_key in _IMAGE_CACHE:
+        return _IMAGE_CACHE[cache_key]
+
+    # Method 1: PIL (Highest quality, instant resize)
+    if HAS_PIL:
+        try:
+            im = Image.open(found_path).convert("RGBA")
+            im = im.resize((width, height), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(im)
+            _IMAGE_CACHE[cache_key] = photo
+            return photo
+        except Exception:
+            pass
+
+    # Method 2: Native PNG/GIF via Tkinter directly
+    _, f_ext = os.path.splitext(found_path)
+    f_ext = f_ext.lower()
+    if f_ext in (".png", ".gif"):
+        try:
+            photo = tk.PhotoImage(file=found_path)
+            _IMAGE_CACHE[cache_key] = photo
+            return photo
+        except Exception:
+            pass
+
+    # Method 3: macOS built-in sips tool
+    cache_png = os.path.join(script_dir, f".cache_{base_name}_{width}x{height}.png")
+    try:
+        if not (os.path.isfile(cache_png) and os.path.getmtime(cache_png) >= os.path.getmtime(found_path)):
+            subprocess.run(
+                ["sips", "-s", "format", "png", "-z", str(height), str(width), found_path, "--out", cache_png],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        if os.path.isfile(cache_png):
+            photo = tk.PhotoImage(file=cache_png)
+            _IMAGE_CACHE[cache_key] = photo
+            return photo
+    except Exception:
+        pass
+
+    try:
+        photo = tk.PhotoImage(file=found_path)
+        _IMAGE_CACHE[cache_key] = photo
+        return photo
+    except Exception:
+        return None
 
 
-def blend(c1, c2, t):
-    a, b = hex2rgb(c1), hex2rgb(c2)
-    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
-
-
-def lighten(c, t=0.18):
-    return blend(c, "#ffffff", t)
-
-
-def gradient_img(w, h, stops, diag=0.5):
-    """Linear gradient. diag: 0 = left-to-right, 1 = top-to-bottom."""
-    x = np.linspace(0, 1, w)[None, :]
-    y = np.linspace(0, 1, h)[:, None]
-    t = np.clip(x * (1 - diag) + y * diag, 0, 1)
-    pos = np.linspace(0, 1, len(stops))
-    cols = np.array([hex2rgb(c) for c in stops], float)
-    arr = np.stack([np.interp(t, pos, cols[:, k]) for k in range(3)], axis=-1)
-    return Image.fromarray(arr.astype("uint8"), "RGB")
-
-
-def make_background(w, h):
-    """Dark aurora glow with tiny stars."""
-    s = 4
-    sw, sh = max(w // s, 1), max(h // s, 1)
-    img = Image.new("RGB", (sw, sh), hex2rgb(BG0))
-    d = ImageDraw.Draw(img)
-    blobs = [(0.04, 0.06, 0.20, "#4c1d95"), (0.97, 0.12, 0.17, "#0e7490"),
-             (0.88, 1.00, 0.22, "#9d174d"), (0.00, 0.98, 0.18, "#1e40af"),
-             (0.50, 0.50, 0.12, "#1e1b4b")]
-    for fx, fy, fr, c in blobs:
-        r = fr * max(sw, sh)
-        d.ellipse([fx * sw - r, fy * sh - r, fx * sw + r, fy * sh + r],
-                  fill=hex2rgb(c))
-    img = img.filter(ImageFilter.GaussianBlur(max(sw * 0.09, 1)))
-    img = img.resize((w, h), Image.BICUBIC)
-    d = ImageDraw.Draw(img)
-    rnd = random.Random(7)
-    for _ in range(110):
-        x, y = rnd.randrange(w), rnd.randrange(h)
-        b = rnd.randint(130, 235)
-        size = rnd.choice([1, 1, 2])
-        d.ellipse([x, y, x + size, y + size], fill=(b, b, 255))
-    return img
-
-
-def make_hero(w, h):
-    """Left hero panel: gradient with soft glowing circles."""
-    base = gradient_img(w, h, ["#4c1d95", "#be185d", "#1e1b4b"], diag=0.85)
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    for cx, cy, r, col in [(w * 0.95, h * 0.05, 130, (236, 72, 153, 70)),
-                           (w * 0.0, h * 0.70, 170, (34, 211, 238, 55)),
-                           (w * 0.9, h * 1.0, 150, (251, 191, 36, 50))]:
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
-    overlay = overlay.filter(ImageFilter.GaussianBlur(18))
-    base = base.convert("RGBA")
-    base.alpha_composite(overlay)
-    return base.convert("RGB")
-
-
-def button_image(w, h, stops, bg):
-    grad = gradient_img(w, h, list(stops), diag=0.0)
-    mask = Image.new("L", (w * 3, h * 3), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * 3 - 1, h * 3 - 1],
-                                           radius=16 * 3, fill=255)
-    mask = mask.resize((w, h), Image.LANCZOS)
-    base = Image.new("RGB", (w, h), hex2rgb(bg))
-    base.paste(grad, (0, 0), mask)
-    return base
-
-
-def paint_gradient_bar(canvas, w, h, stops):
-    steps = 64
-    n = len(stops) - 1
-    for i in range(steps):
-        t = i / (steps - 1)
-        seg = min(int(t * n), n - 1)
-        col = blend(stops[seg], stops[seg + 1], t * n - seg)
-        x0, x1 = int(w * i / steps), int(w * (i + 1) / steps) + 1
-        canvas.create_rectangle(x0, 0, x1, h, fill=col, outline=col, tags="deco")
-
-
-# ---------- DATABASE ----------
-def get_db():
+def connect_db():
     return sqlite3.connect(DB)
 
 
-def q(sql, args=()):
-    con = get_db()
-    rows = con.execute(sql, args).fetchall()
-    con.close()
-    return rows
-
-
-def ex(sql, args=()):
-    con = get_db()
-    con.execute(sql, args)
-    con.commit()
-    con.close()
-
-
-def get_setting(key, default=""):
-    rows = q("SELECT value FROM settings WHERE key=?", (key,))
-    return rows[0][0] if rows else default
-
-
-def set_setting(key, value):
-    ex("INSERT INTO settings (key, value) VALUES (?, ?) "
-       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
-
-
 def setup_database():
-    con = get_db()
+    """Initialize database tables and demo seed records if empty."""
+    con = connect_db()
     cur = con.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS voters (
-                    voter_id TEXT PRIMARY KEY,
-                    name TEXT,
-                    password TEXT,
-                    has_voted INTEGER DEFAULT 0)""")
+        voter_id TEXT PRIMARY KEY,
+        name TEXT,
+        password TEXT,
+        has_voted INTEGER DEFAULT 0
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS candidates (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT,
-                    party TEXT,
-                    votes INTEGER DEFAULT 0)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        party TEXT,
+        votes INTEGER DEFAULT 0
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT)""")
-    cur.executemany("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [
-        ("election_open", "1"), ("results_public", "1"), ("admin_password", "admin123")])
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
+    cur.executemany(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+        [("election_open", "1"), ("results_public", "1"), ("admin_password", "admin123")]
+    )
     if cur.execute("SELECT COUNT(*) FROM voters").fetchone()[0] == 0:
         cur.executemany("INSERT INTO voters VALUES (?, ?, ?, 0)", [
             ("V001", "Younis", "1234"),
@@ -191,7 +177,7 @@ def setup_database():
             ("V005", "Sneha", "1234"),
         ])
     if cur.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 0:
-        cur.executemany("INSERT INTO candidates (name, party) VALUES (?, ?)", [
+        cur.executemany("INSERT INTO candidates (name, party, votes) VALUES (?, ?, 0)", [
             ("Alice Rao", "Unity Party"),
             ("Bilal Khan", "Progress Party"),
             ("Chitra Devi", "Green Party"),
@@ -200,1262 +186,1168 @@ def setup_database():
     con.close()
 
 
-def election_open():
-    return get_setting("election_open", "1") == "1"
+def db_query(sql, args=()):
+    con = connect_db()
+    try:
+        return con.execute(sql, args).fetchall()
+    finally:
+        con.close()
 
 
-def election_stats():
-    total = q("SELECT COUNT(*) FROM voters")[0][0]
-    voted = q("SELECT COUNT(*) FROM voters WHERE has_voted=1")[0][0]
-    cands = q("SELECT id, name, party, votes FROM candidates ORDER BY id")
-    return dict(total=total, voted=voted, remaining=total - voted,
-                turnout=(100.0 * voted / total if total else 0.0),
-                votes=sum(c[3] for c in cands), cands=cands)
+def db_execute(sql, args=()):
+    con = connect_db()
+    try:
+        con.execute(sql, args)
+        con.commit()
+    finally:
+        con.close()
 
 
-# ---------- CUSTOM WIDGETS ----------
-class GradButton(tk.Canvas):
-    """Rounded gradient button (drawn as an image so it looks the same on macOS)."""
-
-    def __init__(self, master, text, command, width=500, height=50,
-                 stops=(VIOLET, PINK), bg=CARD, size=14):
-        super().__init__(master, width=width, height=height, bg=bg,
-                         highlightthickness=0, cursor="hand2")
-        self._cmd = command
-        self._normal = ImageTk.PhotoImage(button_image(width, height, stops, bg))
-        self._hover = ImageTk.PhotoImage(
-            button_image(width, height, [lighten(c) for c in stops], bg))
-        self._img = self.create_image(0, 0, image=self._normal, anchor="nw")
-        self.create_text(width // 2, height // 2, text=text, fill="white",
-                         font=(FONT, size, "bold"))
-        self.bind("<Enter>", lambda e: self.itemconfig(self._img, image=self._hover))
-        self.bind("<Leave>", lambda e: self.itemconfig(self._img, image=self._normal))
-        self.bind("<Button-1>", lambda e: self._cmd())
+def setting(key, default=""):
+    rows = db_query("SELECT value FROM settings WHERE key=?", (key,))
+    return rows[0][0] if rows else default
 
 
-class ScrollFrame(tk.Frame):
-    """A vertically scrollable frame (mouse-wheel aware)."""
-
-    def __init__(self, master, bg=CARD):
-        super().__init__(master, bg=bg)
-        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        self.inner = tk.Frame(self.canvas, bg=bg)
-        self._win = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(
-            scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(
-            self._win, width=e.width))
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
-
-    def _wheel(self, event):
-        if self.inner.winfo_reqheight() > self.canvas.winfo_height():
-            self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+def set_setting(key, value):
+    db_execute(
+        "INSERT INTO settings(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value))
+    )
 
 
-class Dialog(tk.Toplevel):
-    """Styled modal dialog used instead of the plain system message boxes."""
-
-    def __init__(self, app, title, heading, message, confirm_text="OK",
-                 cancel_text=None, color=VIOLET, icon="!", candidate=None,
-                 require_text=None):
-        super().__init__(app, bg=color)
-        self.result = False
-        self.require_text = require_text
-        self.title(title)
-        self.resizable(False, False)
-        self.transient(app)
-
-        outer = tk.Frame(self, bg=CARD)
-        outer.pack(padx=2, pady=2)
-        body = tk.Frame(outer, bg=CARD)
-        body.pack(padx=40, pady=30)
-
-        if candidate:
-            name, party, ccolor = candidate
-            av = tk.Canvas(body, width=92, height=92, bg=CARD, highlightthickness=0)
-            av.create_oval(2, 2, 90, 90, outline=ccolor, width=3)
-            av.create_oval(10, 10, 82, 82, fill=ccolor, outline="")
-            av.create_text(46, 46, text=name[0], fill="white", font=(FONT, 34, "bold"))
-            av.pack()
-        else:
-            av = tk.Canvas(body, width=76, height=76, bg=CARD, highlightthickness=0)
-            av.create_oval(2, 2, 74, 74, outline=color, width=3)
-            av.create_text(38, 38, text=icon, fill=color, font=(FONT, 32, "bold"))
-            av.pack()
-
-        tk.Label(body, text=heading, fg=TEXT, bg=CARD,
-                 font=(FONT, 20, "bold")).pack(pady=(14, 2))
-        if candidate:
-            tk.Label(body, text=candidate[0], fg=candidate[2], bg=CARD,
-                     font=(FONT, 18, "bold")).pack()
-            tk.Label(body, text=candidate[1], fg=MUTED, bg=CARD, font=BODY).pack()
-        tk.Label(body, text=message, fg=MUTED, bg=CARD, font=BODY, wraplength=380,
-                 justify="center").pack(pady=(10, 8))
-
-        self.entry = None
-        self.err = tk.Label(body, text="", fg=DANGER, bg=CARD, font=SMALL)
-        if require_text:
-            wrap = tk.Frame(body, bg=FIELD, highlightthickness=2, highlightbackground=BORDER)
-            self.entry = tk.Entry(wrap, bg=FIELD, fg=TEXT, insertbackground=CYAN,
-                                  relief="flat", bd=0, highlightthickness=0,
-                                  font=(FONT, 16), justify="center", width=14)
-            self.entry.pack(padx=12, pady=8)
-            wrap.pack(pady=(4, 2))
-            self.err.pack()
-
-        row = tk.Frame(body, bg=CARD)
-        row.pack(pady=(14, 0))
-        if cancel_text:
-            GradButton(row, cancel_text, self.cancel, width=150, height=44,
-                       stops=(FIELD, "#1f2866")).pack(side="left", padx=(0, 12))
-        GradButton(row, confirm_text, self.confirm, width=170, height=44,
-                   stops=(color, PINK if color == VIOLET else lighten(color, 0.25))
-                   ).pack(side="left")
-
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-        self.bind("<Escape>", lambda e: self.cancel())
-        self.bind("<Return>", lambda e: self.confirm())
-
-        self.update_idletasks()
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-        x = app.winfo_rootx() + (app.winfo_width() - w) // 2
-        y = app.winfo_rooty() + (app.winfo_height() - h) // 2
-        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        try:
-            self.wait_visibility()
-            self.grab_set()
-        except tk.TclError:
-            pass
-        (self.entry or self).focus_force()
-
-    def confirm(self):
-        if self.require_text and self.entry.get().strip().upper() != self.require_text:
-            self.err.config(text=f"Type {self.require_text} to continue.")
-            return
-        self.result = True
-        self.destroy()
-
-    def cancel(self):
-        self.result = False
-        self.destroy()
+def is_election_open():
+    return setting("election_open", "1") == "1"
 
 
-def make_entry(parent, show="", size=14, var=None):
-    wrap = tk.Frame(parent, bg=FIELD, highlightthickness=2, highlightbackground=BORDER)
-    entry = tk.Entry(wrap, bg=FIELD, fg=TEXT, insertbackground=CYAN, relief="flat",
-                     bd=0, highlightthickness=0, font=(FONT, size), show=show,
-                     textvariable=var)
-    entry.pack(fill="x", padx=14, pady=10)
-    entry.bind("<FocusIn>", lambda e: wrap.config(highlightbackground=VIOLET))
-    entry.bind("<FocusOut>", lambda e: wrap.config(highlightbackground=BORDER))
-    return wrap, entry
+def get_stats():
+    total = db_query("SELECT COUNT(*) FROM voters")[0][0]
+    voted = db_query("SELECT COUNT(*) FROM voters WHERE has_voted=1")[0][0]
+    candidates = db_query("SELECT id, name, party, votes FROM candidates ORDER BY id")
+    vote_total = sum(row[3] for row in candidates)
+    return {
+        "total": total,
+        "voted": voted,
+        "remaining": max(total - voted, 0),
+        "turnout": (100 * voted / total) if total else 0,
+        "votes": vote_total,
+        "candidates": candidates,
+    }
 
 
-def caption(parent, text, pady=(10, 4)):
-    tk.Label(parent, text=text, fg=CYAN, bg=CARD, font=CAPTION).pack(anchor="w", pady=pady)
-
-
-def chip(parent, text, color, bg=FIELD):
-    return tk.Label(parent, text=text, fg=color, bg=bg, font=(FONT, 10, "bold"),
-                    padx=12, pady=5)
-
-
-def make_tree(parent, columns, headings, widths):
-    frame = tk.Frame(parent, bg=CARD)
-    tree = ttk.Treeview(frame, columns=columns, show="headings", style="Neon.Treeview",
-                        selectmode="browse")
-    for col, head, wd in zip(columns, headings, widths):
-        tree.heading(col, text=head)
-        tree.column(col, width=wd, anchor="w")
-    bar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview,
-                        style="Neon.Vertical.TScrollbar")
-    tree.configure(yscrollcommand=bar.set)
-    tree.pack(side="left", fill="both", expand=True)
-    bar.pack(side="right", fill="y")
-    return frame, tree
-
-
-def draw_hbars(c, items, w, h, maximum):
-    c.delete("all")
-    if not items:
-        c.create_text(w / 2, h / 2, text="No data yet", fill=MUTED, font=BODY)
-        return
-    maximum = max(maximum, 1)
-    row = (h - 10) / len(items)
-    label_w = 120
-    for i, (label, val, color) in enumerate(items):
-        y = 8 + row * i + row / 2
-        c.create_text(6, y, text=label[:15], fill=TEXT, anchor="w", font=SMALL)
-        c.create_rectangle(label_w, y - 9, w - 46, y + 9, fill=FIELD, outline="")
-        end = label_w + (w - 46 - label_w) * val / maximum
-        if val > 0:
-            c.create_rectangle(label_w, y - 9, end, y + 9, fill=color, outline="")
-        c.create_text(w - 6, y, text=str(val), fill=TEXT, anchor="e", font=(FONT, 11, "bold"))
-
-
-# ---------- APP ----------
-class VotingApp(tk.Tk):
+class SecureVote(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SecureVote - Online Voting System")
-        self.geometry("1100x720")
-        self.minsize(1000, 680)
-        self.configure(bg=BG0)
+        self.title("SecureVote | Voting Management System")
+        self.geometry("1280x820")
+        self.minsize(1100, 720)
+        self.configure(bg=BG)
 
         self.current_voter = None
         self.otp = None
-        self.otp_time = 0
-        self.attempts = 0
-        self.after_id = None
-        self.fx_id = None
-        self.flash_job = None
-        self.res_win = None
-        self.is_admin = False
+        self.otp_started = 0
+        self.otp_attempts = 0
+        self.otp_job = None
+        self.selected_candidate = None
+        self.admin_logged_in = False
+        self.result_window = None
+        self.current_screen = None
         self.login_mode = "voter"
-        self.admin_msg = None
-        self._resize_job = None
-        self._bg_photo = None
 
         self.setup_styles()
-        self.bg = tk.Canvas(self, highlightthickness=0, bg=BG0)
-        self.bg.pack(fill="both", expand=True)
-
-        # glowing gradient border behind the card
-        self._border_photo = ImageTk.PhotoImage(
-            gradient_img(CARD_W + 6, CARD_H + 6, [VIOLET, PINK, CYAN], diag=0.5))
-        self.border_id = self.bg.create_image(550, 360, image=self._border_photo)
-
-        self.card = tk.Frame(self.bg, bg=CARD)
-        self.card.pack_propagate(False)
-        self.card_id = self.bg.create_window(550, 360, window=self.card,
-                                             width=CARD_W, height=CARD_H)
-
-        self.hero_photo = ImageTk.PhotoImage(make_hero(HERO_W, CARD_H))
-        self.bg.bind("<Configure>", self.on_resize)
+        self.root = tk.Frame(self, bg=BG)
+        self.root.pack(fill="both", expand=True)
         self.show_login()
 
     def setup_styles(self):
-        st = ttk.Style(self)
-        st.theme_use("clam")
-        st.configure("Neon.Treeview", background=FIELD, fieldbackground=FIELD,
-                     foreground=TEXT, rowheight=32, borderwidth=0, font=(FONT, 11))
-        st.configure("Neon.Treeview.Heading", background="#241a5e", foreground="white",
-                     relief="flat", font=(FONT, 11, "bold"), padding=8)
-        st.map("Neon.Treeview", background=[("selected", VIOLET)],
-               foreground=[("selected", "white")])
-        st.map("Neon.Treeview.Heading", background=[("active", "#33257f")])
-        st.configure("Neon.Vertical.TScrollbar", background=BORDER, troughcolor=CARD,
-                     bordercolor=CARD, arrowcolor=TEXT, relief="flat")
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("SV.Treeview", background=FIELD, fieldbackground=FIELD,
+                        foreground=TEXT, rowheight=36, borderwidth=0, font=(FONT, 11))
+        style.configure("SV.Treeview.Heading", background="#1a253d", foreground=CYAN,
+                        font=(FONT, 10, "bold"), padding=11, relief="flat")
+        style.map("SV.Treeview", background=[("selected", PURPLE)],
+                  foreground=[("selected", "white")])
+        style.configure("SV.TCombobox", fieldbackground=FIELD, background=FIELD,
+                        foreground=TEXT)
 
-    # ----- Background -----
-    def on_resize(self, event=None):
-        if self._resize_job:
-            self.after_cancel(self._resize_job)
-        self._resize_job = self.after(120, self.draw_background)
-
-    def draw_background(self):
-        self._resize_job = None
-        w, h = self.bg.winfo_width(), self.bg.winfo_height()
-        if w < 50 or h < 50:
-            return
-        self.bg.delete("deco")
-        self._bg_photo = ImageTk.PhotoImage(make_background(w, h))
-        self.bg.create_image(0, 0, image=self._bg_photo, anchor="nw", tags="deco")
-        self.bg.tag_lower("deco")
-        self.bg.coords(self.card_id, w / 2, h / 2)
-        self.bg.coords(self.border_id, w / 2, h / 2)
-
-    # ----- Dialog helpers -----
-    def ask(self, title, heading, message, confirm="Confirm", cancel="Cancel",
-            color=VIOLET, icon="!", candidate=None, require_text=None):
-        dlg = Dialog(self, title, heading, message, confirm, cancel, color, icon,
-                     candidate, require_text)
-        self.wait_window(dlg)
-        return dlg.result
-
-    def notify(self, heading, message, color=AMBER, icon="!"):
-        self.ask(heading, heading, message, "OK", None, color, icon)
-
-    # ----- Layout helpers -----
     def clear(self):
-        for attr in ("after_id", "fx_id", "flash_job"):
-            job = getattr(self, attr)
-            if job:
-                self.after_cancel(job)
-                setattr(self, attr, None)
-        self.unbind("<Return>")
-        self.unbind_all("<MouseWheel>")
-        self.admin_msg = None
-        for widget in self.card.winfo_children():
-            widget.destroy()
+        if self.otp_job:
+            try:
+                self.after_cancel(self.otp_job)
+            except tk.TclError:
+                pass
+            self.otp_job = None
+        for child in self.root.winfo_children():
+            child.destroy()
 
-    def build_shell(self, step):
+    def create_screen_canvas(self, filename):
+        """Create a full-window background canvas with the specified image template."""
+        w = max(self.root.winfo_width(), self.winfo_width(), 1280)
+        h = max(self.root.winfo_height(), self.winfo_height(), 820)
+        canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+
+        photo = load_image_tk(filename, w, h)
+        if not photo:
+            photo = load_image_tk("background.png", w, h)
+
+        if photo:
+            canvas.create_image(0, 0, image=photo, anchor="nw")
+            canvas.bg_photo_ref = photo
+        else:
+            canvas.create_rectangle(0, 0, w, h, fill="#070b19", outline="")
+            canvas.create_text(w // 2, 28, text=f"Place '{filename}' in folder to display template",
+                               fill=MUTED, font=(FONT, 10))
+
+        return canvas, w, h
+
+    def label(self, parent, text, size=12, color=TEXT, bold=False, **kwargs):
+        return tk.Label(parent, text=text, bg=kwargs.pop("bg", parent.cget("bg")),
+                        fg=color, font=(FONT, size, "bold" if bold else "normal"),
+                        **kwargs)
+
+    def button(self, parent, text, command, color=SKYBLUE, hover_color=None, width=None):
+        if not hover_color:
+            hover_color = SKYBLUE_HOVER if color == SKYBLUE else PURPLE_HOVER
+        btn = tk.Button(parent, text=text, command=command, bg=color, fg="#082033" if color == SKYBLUE else "white",
+                        activebackground=hover_color, activeforeground="white",
+                        font=(FONT, 11, "bold"), relief="flat", bd=0, cursor="hand2",
+                        padx=18, pady=10)
+        if width:
+            btn.config(width=width)
+        btn.bind("<Enter>", lambda e: btn.config(bg=hover_color))
+        btn.bind("<Leave>", lambda e: btn.config(bg=color))
+        return btn
+
+    def entry(self, parent, show=None):
+        wrap = tk.Frame(parent, bg=FIELD, highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+        ent = tk.Entry(wrap, bg=FIELD, fg=TEXT, insertbackground=CYAN,
+                       relief="flat", bd=0, font=(FONT, 13), show=show)
+        ent.pack(fill="x", padx=12, pady=10)
+        ent.bind("<FocusIn>", lambda e: wrap.config(highlightbackground=CYAN))
+        ent.bind("<FocusOut>", lambda e: wrap.config(highlightbackground=BORDER_SUBTLE))
+        return wrap, ent
+
+    def make_canvas_clickable(self, canvas, item_id, normal_color, hover_color, action):
+        canvas.tag_bind(item_id, "<Button-1>", lambda e: action())
+        canvas.tag_bind(item_id, "<Enter>", lambda e: (canvas.config(cursor="hand2"), canvas.itemconfig(item_id, fill=hover_color)))
+        canvas.tag_bind(item_id, "<Leave>", lambda e: (canvas.config(cursor=""), canvas.itemconfig(item_id, fill=normal_color)))
+
+    # =========================================================================
+    # STEP 1: LOGIN / HERO SCREEN (Blended with background.png)
+    # =========================================================================
+    def show_login(self, mode="voter"):
         self.clear()
-        hero = tk.Canvas(self.card, width=HERO_W, height=CARD_H,
-                         highlightthickness=0, bg="#4c1d95")
-        hero.pack(side="left")
-        hero.create_image(0, 0, image=self.hero_photo, anchor="nw")
-
-        cx, y = 60, 52
-        hero.create_polygon(cx - 28, y, cx + 28, y, cx + 28, y + 32, cx, y + 60,
-                            cx - 28, y + 32, fill="white", outline="")
-        hero.create_text(cx, y + 26, text="✓", fill=VIOLET, font=(FONT, 26, "bold"))
-        hero.create_text(32, 142, text="SecureVote", fill="white", anchor="w",
-                         font=(FONT, 30, "bold"))
-        hero.create_text(32, 182, text="Your voice. Verified. Counted.", fill="#f5d0fe",
-                         anchor="w", font=BODY)
-
-        top, gap = 262, 66
-        for i, label in enumerate(STEPS):
-            cy = top + i * gap
-            if i < len(STEPS) - 1:
-                hero.create_line(48, cy + 17, 48, cy + gap - 17,
-                                 fill=("#a7f3d0" if i < step else "#c084fc"), width=2)
-            if i < step:
-                hero.create_oval(32, cy - 16, 64, cy + 16, fill=MINT, outline="")
-                hero.create_text(48, cy, text="✓", fill="white", font=(FONT, 14, "bold"))
-                color, fnt = "white", (FONT, 14)
-            elif i == step:
-                hero.create_oval(28, cy - 20, 68, cy + 20, outline="white", width=2)
-                hero.create_oval(34, cy - 14, 62, cy + 14, fill="white", outline="")
-                hero.create_text(48, cy, text=str(i + 1), fill=VIOLET, font=(FONT, 14, "bold"))
-                color, fnt = "white", (FONT, 15, "bold")
-            else:
-                hero.create_oval(32, cy - 16, 64, cy + 16, outline="#c084fc", width=2)
-                hero.create_text(48, cy, text=str(i + 1), fill="#e9d5ff", font=(FONT, 13))
-                color, fnt = "#e9d5ff", (FONT, 14)
-            hero.create_text(82, cy, text=label, fill=color, anchor="w", font=fnt)
-
-        hero.create_text(32, CARD_H - 34, text="OTP verified   •   One person, one vote",
-                         fill="#e9d5ff", anchor="w", font=SMALL)
-
-        right = tk.Frame(self.card, bg=CARD)
-        right.pack(side="left", fill="both", expand=True, padx=48, pady=34)
-        return right
-
-    def make_msg(self, parent, side="top"):
-        self.msg = tk.Label(parent, text="", bg=CARD, fg=DANGER, font=(FONT, 12), anchor="w")
-        self.msg.pack(fill="x", side=side)
-
-    def set_msg(self, text, color=DANGER):
-        self.msg.config(text=text, fg=color)
-
-    def can_view_results(self):
-        return self.is_admin or get_setting("results_public", "1") == "1" or not election_open()
-
-    # =============== LOGIN (voter + admin) ===============
-    def show_login(self, mode=None):
-        if mode:
-            self.login_mode = mode
+        self.login_mode = mode
+        self.current_screen = "login"
         self.current_voter = None
         self.otp = None
-        self.is_admin = False
-        admin = self.login_mode == "admin"
-        right = self.build_shell(0)
+        self.admin_logged_in = False
 
-        is_open = election_open()
-        chip(right, "●  ELECTION OPEN" if is_open else "●  ELECTION CLOSED",
-             MINT if is_open else DANGER).pack(anchor="w")
+        canvas, w, h = self.create_screen_canvas("background.png")
 
-        seg = tk.Frame(right, bg=FIELD, highlightthickness=1, highlightbackground=BORDER)
-        seg.pack(fill="x", pady=(14, 16))
-        for key, label in (("voter", "Voter"), ("admin", "Admin")):
-            active = key == self.login_mode
-            lbl = tk.Label(seg, text=label, cursor="hand2", pady=8,
-                           font=(FONT, 12, "bold"), bg=VIOLET if active else FIELD,
-                           fg="white" if active else MUTED)
-            lbl.pack(side="left", expand=True, fill="x")
-            lbl.bind("<Button-1>", lambda e, k=key: self.show_login(k))
+        # 1. Top Navbar (Floating on canvas with distinct neon colors)
+        canvas.create_text(52, 45, text="✓  SECUREVOTE", fill=CYAN, anchor="nw", font=(FONT, 14, "bold"))
+        nav_items = [
+            (290, "REGISTER", "#4ade80", "#86efac", self.show_register_dialog),
+            (380, "LOGIN", "#ec4899", "#f472b6", lambda: self.login_id.focus_set() if hasattr(self, "login_id") else None),
+            (455, "ABOUT", "#fbbf24", "#fde047", self.show_about_dialog),
+            (530, "FAQ", "#38bdf8", "#7dd3fc", self.show_faq_dialog)
+        ]
+        for x, label, color_norm, color_hov, action in nav_items:
+            nav = canvas.create_text(x, 46, text=label, fill=color_norm, anchor="nw", font=(FONT, 10, "bold"))
+            self.make_canvas_clickable(canvas, nav, color_norm, color_hov, action)
 
-        tk.Label(right, text="Admin sign in" if admin else "Welcome back", font=H1,
-                 fg=TEXT, bg=CARD).pack(anchor="w")
-        tk.Label(right, text="Manage candidates, voters and the election" if admin
-                 else "Log in with your Voter ID to cast your vote",
-                 fg=MUTED, bg=CARD, font=BODY).pack(anchor="w", pady=(2, 16))
+        # 2. Hero Headline (Two-tone vibrant neon typography)
+        canvas.create_text(55, 132, text="Decentralized", fill="#38bdf8", anchor="nw",
+                           font=(FONT, 44, "bold"))
+        canvas.create_text(55, 185, text="Ballot System", fill="#fbbf24", anchor="nw",
+                           font=(FONT, 44, "bold"))
 
-        tk.Label(right, text="USERNAME" if admin else "VOTER ID", fg=CYAN, bg=CARD,
-                 font=CAPTION).pack(anchor="w")
-        wrap, self.id_entry = make_entry(right)
-        wrap.pack(fill="x", pady=(4, 12))
+        # 3. Subtitle Description (Colored headings & crisp contrast)
+        canvas.create_text(
+            58, 252,
+            text="✦  SECURE DIGITAL VOTING MANAGEMENT PLATFORM",
+            fill="#ff8066", anchor="nw", font=(FONT, 11, "bold")
+        )
+        canvas.create_text(
+            58, 276,
+            text="Next-generation digital balloting with cryptographic identity verification,\n"
+                 "real-time turnout auditing, and tamper-evident local record keeping.",
+            fill="#cbd5e1", anchor="nw", font=(FONT, 11), justify="left"
+        )
 
-        hdr = tk.Frame(right, bg=CARD)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text="PASSWORD", fg=CYAN, bg=CARD, font=CAPTION).pack(side="left")
-        show_lbl = tk.Label(hdr, text="Show", fg=MUTED, bg=CARD, cursor="hand2", font=SMALL)
-        show_lbl.pack(side="right")
-        wrap, self.pw_entry = make_entry(right, show="*")
-        wrap.pack(fill="x", pady=(4, 4))
+        # 4. Action Pill Button
+        action_btn = tk.Button(
+            self.root,
+            text="⚡  Cast Your Vote" if mode == "voter" else "⚙  Access Admin",
+            command=lambda: self.login_id.focus_set() if hasattr(self, "login_id") else None,
+            bg="#d926a9", fg="white", activebackground="#f72585",
+            activeforeground="white", relief="flat", bd=0,
+            font=(FONT, 12, "bold"), padx=26, pady=12, cursor="hand2"
+        )
+        action_btn.bind("<Enter>", lambda e: action_btn.config(bg="#f72585"))
+        action_btn.bind("<Leave>", lambda e: action_btn.config(bg="#d926a9"))
+        canvas.create_window(155, 385, window=action_btn)
 
-        def toggle_pw(event=None):
-            hidden = self.pw_entry.cget("show") == "*"
-            self.pw_entry.config(show="" if hidden else "*")
-            show_lbl.config(text="Hide" if hidden else "Show")
-        show_lbl.bind("<Button-1>", toggle_pw)
+        # Feature pills floating on canvas with individual colors
+        features = [
+            (58, "🔒 256-Bit OTP", "#4ade80"),
+            (205, "⚡ Instant Tally", "#fbbf24"),
+            (355, "📊 Tamper-Evident", "#ec4899")
+        ]
+        for fx, feat, fcolor in features:
+            canvas.create_text(fx, 450, text=feat, fill=fcolor, anchor="nw", font=(FONT, 10, "bold"))
 
-        self.make_msg(right)
-        GradButton(right, "Sign in  →", self.check_login,
-                   stops=(CYAN, VIOLET) if admin else (VIOLET, PINK)).pack(pady=(6, 12))
+        # Footer badge
+        canvas.create_text(55, h - 45, text="DEMO APPLICATION  •  FOR EDUCATIONAL USE ONLY",
+                           fill="#a5b4fc", anchor="nw", font=(FONT, 9, "bold"))
 
-        if not admin and self.can_view_results():
-            link = tk.Label(right, text="View election results", fg=PINK, bg=CARD,
-                            cursor="hand2", font=(FONT, 12, "underline"))
-            link.pack(anchor="w")
-            link.bind("<Button-1>", lambda e: self.show_results())
+        # 5. BLENDED GLASSMORPHIC LOGIN (NO OPAQUE BOX COVERING BACKGROUND)
+        card_w, card_h = 370, 480
+        card_x = max(w - 425, 700)
+        card_y = max((h - card_h) // 2 + 10, 130)
+        card_cx = card_x + card_w // 2
 
-        tk.Label(right, text="Demo admin:  admin / admin123" if admin
-                 else "Demo voters: V001 to V005   |   Password: 1234",
-                 fg=MUTED, bg=CARD, font=SMALL).pack(side="bottom", anchor="w")
+        # Transparent HUD Outline (The liquid waves flow right through!)
+        canvas.create_rectangle(card_x, card_y, card_x + card_w, card_y + card_h,
+                                outline=BORDER, width=1.5)
+        # Glowing top accent line
+        canvas.create_line(card_x, card_y, card_x + card_w, card_y, fill=CYAN, width=3)
 
-        self.bind("<Return>", lambda e: self.check_login())
-        self.id_entry.focus_set()
+        # Header text floating directly on wallpaper
+        canvas.create_text(card_cx, card_y + 36, text="SECURE VOTE", fill=CYAN,
+                           font=(FONT, 20, "bold"))
+        canvas.create_text(card_cx, card_y + 60,
+                           text="Voter Authentication" if mode == "voter" else "Administrator Portal",
+                           fill="#c084fc" if mode == "voter" else "#fb923c", font=(FONT, 10, "bold"))
 
-    def check_login(self):
-        ident = self.id_entry.get().strip()
-        password = self.pw_entry.get().strip()
+        badge_text = "✦ VOTER LOGIN ✦" if mode == "voter" else "✦ ADMIN LOGIN ✦"
+        badge_color = "#facc15" if mode == "voter" else "#f43f5e"
+        canvas.create_text(card_cx, card_y + 90, text=badge_text, fill=badge_color,
+                           font=(FONT, 12, "bold"))
 
-        if self.login_mode == "admin":
-            if ident.lower() == "admin" and password == get_setting("admin_password"):
-                self.is_admin = True
+        # Floating Sleek Input: Voter ID
+        canvas.create_text(card_x + 30, card_y + 124,
+                           text="VOTER ID" if mode == "voter" else "ADMIN USERNAME",
+                           fill="#38bdf8", font=(FONT, 9, "bold"), anchor="w")
+        self.login_id = tk.Entry(self.root, font=(FONT, 12, "bold"), bd=0, relief="flat",
+                                 bg="#0a1024", fg="#38bdf8", insertbackground=CYAN,
+                                 highlightthickness=1, highlightbackground=BORDER_SUBTLE,
+                                 highlightcolor=CYAN)
+        canvas.create_window(card_cx, card_y + 152, window=self.login_id, width=card_w - 60, height=36)
+
+        # Floating Sleek Input: Password
+        canvas.create_text(card_x + 30, card_y + 192, text="PASSWORD",
+                           fill="#ff8066", font=(FONT, 9, "bold"), anchor="w")
+        self.login_password = tk.Entry(self.root, font=(FONT, 12, "bold"), show="*", bd=0,
+                                       relief="flat", bg="#0a1024", fg="#f43f5e",
+                                       insertbackground="#ff8066", highlightthickness=1,
+                                       highlightbackground=BORDER_SUBTLE, highlightcolor="#ff8066")
+        canvas.create_window(card_cx, card_y + 220, window=self.login_password, width=card_w - 60, height=36)
+
+        # Show password toggle
+        self.show_password = tk.BooleanVar(value=False)
+        show_pw = tk.Checkbutton(self.root, text="Show password", variable=self.show_password,
+                                 command=self.toggle_password, bg="#0a1024", fg="#93c5fd",
+                                 activebackground="#0a1024", activeforeground=CYAN,
+                                 selectcolor="#0f1938", font=(FONT, 9, "bold"), bd=0, highlightthickness=0)
+        canvas.create_window(card_x + 88, card_y + 252, window=show_pw)
+
+        # Floating message text
+        self.login_msg_id = canvas.create_text(card_cx, card_y + 282, text="",
+                                               fill="#ff8e9b", font=(FONT, 9, "bold"), width=card_w - 60)
+
+        # Sign-in button
+        sign_in_btn = tk.Button(self.root, text="SIGN IN  ➔", command=self.login,
+                                bg="#38bdf8", fg="#041729", activebackground="#0ea5e9",
+                                activeforeground="white", relief="flat", bd=0,
+                                font=(FONT, 12, "bold"), cursor="hand2")
+        canvas.create_window(card_cx, card_y + 322, window=sign_in_btn, width=card_w - 60, height=40)
+
+        # Interactive Switch Role link on canvas
+        sw_btn = canvas.create_text(card_cx, card_y + 368,
+                                    text="Switch to Admin" if mode == "voter" else "Switch to Voter",
+                                    fill="#c084fc", font=(FONT, 10, "bold"))
+        self.make_canvas_clickable(canvas, sw_btn, "#c084fc", "#e9d5ff",
+                                   lambda: self.show_login("admin" if mode == "voter" else "voter"))
+
+        # Demo Credentials hint
+        demo_hint = "Demo: V001–V005  •  Password: 1234" if mode == "voter" else "Demo: admin  •  Password: admin123"
+        demo_color = "#4ade80" if mode == "voter" else "#fbbf24"
+        canvas.create_text(card_cx, card_y + 400, text=demo_hint, fill=demo_color, font=(FONT, 9, "bold"))
+
+        # View Results link
+        if mode == "voter" and (setting("results_public", "1") == "1" or not is_election_open()):
+            res_link = canvas.create_text(card_cx, card_y + 428, text="View live election results  ↗",
+                                          fill="#ff8066", font=(FONT, 9, "bold"))
+            self.make_canvas_clickable(canvas, res_link, "#ff8066", "#fda4af", self.show_results)
+
+        self.login_canvas = canvas
+        self.bind("<Return>", lambda e: self.login())
+        self.login_id.focus_set()
+
+    def toggle_password(self):
+        self.login_password.config(show="" if self.show_password.get() else "*")
+
+    def login(self):
+        ident = self.login_id.get().strip()
+        password = self.login_password.get().strip()
+        mode = getattr(self, "login_mode", "voter")
+
+        if mode == "admin":
+            if ident.lower() == "admin" and hmac.compare_digest(password, setting("admin_password", "admin123")):
+                self.admin_logged_in = True
                 self.show_admin()
             else:
-                self.set_msg("Wrong admin username or password.")
+                self.login_canvas.itemconfig(self.login_msg_id, text="Incorrect admin username or password.")
             return
 
-        rows = q("SELECT voter_id, name, password, has_voted FROM voters WHERE voter_id=?",
-                 (ident,))
-        row = rows[0] if rows else None
-        if row is None or row[2] != password:
-            self.set_msg("Wrong Voter ID or password.")
+        rows = db_query("SELECT voter_id, name, password, has_voted FROM voters WHERE voter_id=?", (ident,))
+        voter = rows[0] if rows else None
+        if not voter or not hmac.compare_digest(password, str(voter[2])):
+            self.login_canvas.itemconfig(self.login_msg_id, text="Incorrect Voter ID or password.")
             return
-        if not election_open():
-            self.set_msg("The election is closed. Voting is not available.")
+        if not is_election_open():
+            self.login_canvas.itemconfig(self.login_msg_id, text="Voting is currently closed.")
             return
-        if row[3] == 1:
-            self.set_msg("You have already cast your vote.")
+        if voter[3]:
+            self.login_canvas.itemconfig(self.login_msg_id, text="You have already cast your vote.")
             return
 
-        self.current_voter = (row[0], row[1])
-        self.new_otp()
+        self.current_voter = (voter[0], voter[1])
+        self.otp = f"{random.SystemRandom().randint(0, 999999):06d}"
+        self.otp_started = time.time()
+        self.otp_attempts = 0
         self.show_otp()
 
-    def new_otp(self):
-        self.otp = str(random.randint(100000, 999999))
-        self.otp_time = time.time()
-        self.attempts = 0
-
-    # =============== OTP ===============
+    # =========================================================================
+    # STEP 2: OTP VERIFICATION (Blended with verify.png Cyber Shield)
+    # =========================================================================
     def show_otp(self):
-        right = self.build_shell(1)
+        self.clear()
+        self.current_screen = "otp"
+        canvas, w, h = self.create_screen_canvas("verify.png")
+        self.otp_canvas = canvas
 
-        tk.Label(right, text="Verify it's you", font=H1, fg=TEXT, bg=CARD).pack(anchor="w")
-        tk.Label(right, text=f"Hello {self.current_voter[1]}, enter the 6-digit code",
-                 fg=MUTED, bg=CARD, font=BODY).pack(anchor="w", pady=(2, 16))
+        # Positioned to the left/center so the glowing padlock on the right is fully visible!
+        box_w, box_h = 470, 480
+        box_x = max(80, min(140, (w - box_w) // 2 - 120))
+        box_y = (h - box_h) // 2
+        box_cx = box_x + box_w // 2
 
-        banner = tk.Frame(right, bg="#0b2a2e", highlightthickness=1, highlightbackground=MINT)
-        banner.pack(fill="x", pady=(0, 20))
-        tk.Label(banner, text="DEMO SMS", bg="#0b2a2e", fg=MINT,
-                 font=(FONT, 9, "bold")).pack(anchor="w", padx=14, pady=(9, 0))
-        self.otp_banner = tk.Label(banner, text="", bg="#0b2a2e", fg=TEXT, font=BODY,
-                                   justify="left")
-        self.otp_banner.pack(anchor="w", padx=14, pady=(0, 9))
-        self.refresh_banner()
+        # Glass HUD outline (no solid opaque box!)
+        canvas.create_rectangle(box_x, box_y, box_x + box_w, box_y + box_h,
+                                outline="#2dd4bf", width=1.5)
+        canvas.create_line(box_x, box_y, box_x + box_w, box_y, fill=CYAN, width=3)
 
-        row = tk.Frame(right, bg=CARD)
-        row.pack(anchor="w", pady=(0, 8))
-        self.otp_boxes = []
-        for i in range(6):
-            w = tk.Frame(row, bg=FIELD, highlightthickness=2, highlightbackground=BORDER)
-            e = tk.Entry(w, width=2, justify="center", font=(FONT, 26, "bold"),
-                         bg=FIELD, fg=TEXT, insertbackground=CYAN, relief="flat",
-                         bd=0, highlightthickness=0)
-            e.pack(padx=7, pady=9)
-            w.pack(side="left", padx=(0, 10))
-            e.bind("<KeyRelease>", lambda ev, i=i: self.otp_key(ev, i))
-            e.bind("<BackSpace>", lambda ev, i=i: self.otp_back(i))
-            e.bind("<FocusIn>", lambda ev, w=w: w.config(highlightbackground=VIOLET))
-            e.bind("<FocusOut>", lambda ev, w=w: w.config(highlightbackground=BORDER))
-            self.otp_boxes.append(e)
+        # Header floating on wallpaper
+        canvas.create_text(box_x + 30, box_y + 36, text="🛡️  SECUREVOTE 2FA VERIFICATION",
+                           fill=CYAN, font=(FONT, 10, "bold"), anchor="w")
+        canvas.create_text(box_x + 30, box_y + 64, text="Verify",
+                           fill="#38bdf8", font=(FONT, 24, "bold"), anchor="w")
+        canvas.create_text(box_x + 108, box_y + 64, text="Your Identity",
+                           fill="#ec4899", font=(FONT, 24, "bold"), anchor="w")
+        canvas.create_text(box_x + 30, box_y + 94,
+                           text=f"Hello, {self.current_voter[1]}! (Voter ID: {self.current_voter[0]})",
+                           fill="#4ade80", font=(FONT, 12, "bold"), anchor="w")
+        canvas.create_text(box_x + 30, box_y + 114,
+                           text="Enter the 6-digit authentication token to unlock your official ballot.",
+                           fill="#cbd5e1", font=(FONT, 10), anchor="w")
 
-        self.countdown = tk.Label(right, text="", bg=CARD, fg=MUTED, font=(FONT, 12), anchor="w")
-        self.countdown.pack(fill="x")
-        self.make_msg(right)
+        # Holographic Demonstration OTP Token Badge (Golden outline & Emerald Code)
+        canvas.create_rectangle(box_x + 30, box_y + 130, box_x + box_w - 30, box_y + 198,
+                                outline="#fbbf24", width=1.5)
+        canvas.create_text(box_x + 42, box_y + 146, text="✦ DEMONSTRATION SECURITY TOKEN",
+                           fill="#fbbf24", font=(FONT, 9, "bold"), anchor="w")
+        self.otp_demo_canvas_id = canvas.create_text(box_cx, box_y + 172,
+                                                     text=f"•  {self.otp}  •   (test mode)",
+                                                     fill="#4ade80", font=(FONT, 19, "bold"))
 
-        GradButton(right, "Verify  →", self.verify_otp,
-                   stops=(CYAN, VIOLET)).pack(pady=(8, 12))
+        # Input label in Coral
+        canvas.create_text(box_x + 30, box_y + 218, text="ENTER 6-DIGIT OTP CODE",
+                           fill="#ff8066", font=(FONT, 9, "bold"), anchor="w")
 
-        links = tk.Frame(right, bg=CARD)
-        links.pack(fill="x")
-        resend = tk.Label(links, text="Resend OTP", fg=PINK, bg=CARD, cursor="hand2",
-                          font=(FONT, 13, "underline"))
-        resend.pack(side="left")
-        resend.bind("<Button-1>", lambda e: self.resend_otp())
-        back = tk.Label(links, text="Back to login", fg=MUTED, bg=CARD, cursor="hand2",
-                        font=(FONT, 13, "underline"))
-        back.pack(side="right")
-        back.bind("<Button-1>", lambda e: self.show_login())
+        # Sleek Minimalist OTP Entry with bright cyan numbers
+        self.otp_entry = tk.Entry(self.root, font=(FONT, 18, "bold"), justify="center",
+                                  bd=0, relief="flat", bg="#06122c", fg="#38bdf8",
+                                  insertbackground=CYAN, highlightthickness=1,
+                                  highlightbackground=BORDER_SUBTLE, highlightcolor=CYAN)
+        canvas.create_window(box_cx, box_y + 248, window=self.otp_entry, width=box_w - 60, height=44)
 
+        # Countdown & message floating directly on canvas in Gold & Red
+        self.otp_countdown_id = canvas.create_text(box_x + 30, box_y + 288, text="",
+                                                   fill="#fbbf24", font=(FONT, 10, "bold"), anchor="w")
+        self.otp_msg_id = canvas.create_text(box_x + 30, box_y + 310, text="",
+                                             fill="#fb7185", font=(FONT, 10, "bold"), anchor="w", width=box_w - 60)
+
+        # Action Button
+        verify_btn = tk.Button(self.root, text="Verify OTP & Open Ballot  ➔", command=self.verify_otp,
+                               bg="#38bdf8", fg="#041729", activebackground="#0ea5e9",
+                               activeforeground="white", relief="flat", bd=0,
+                               font=(FONT, 12, "bold"), cursor="hand2")
+        canvas.create_window(box_cx, box_y + 355, window=verify_btn, width=box_w - 60, height=44)
+
+        # Interactive links on canvas
+        resend_btn = canvas.create_text(box_x + 30, box_y + 410, text="🔄  Resend New Code",
+                                        fill=CYAN, font=(FONT, 10, "bold"), anchor="w")
+        self.make_canvas_clickable(canvas, resend_btn, CYAN, "#7dd3fc", self.resend_otp)
+
+        back_btn = canvas.create_text(box_x + box_w - 30, box_y + 410, text="✕  Cancel & Return to Login",
+                                      fill="#fb7185", font=(FONT, 10, "bold"), anchor="e")
+        self.make_canvas_clickable(canvas, back_btn, "#fb7185", "#fda4af", lambda: self.show_login("voter"))
+
+        self.otp_entry.focus_set()
+        self.tick_otp()
         self.bind("<Return>", lambda e: self.verify_otp())
-        self.otp_boxes[0].focus_set()
-        self.tick()
 
-    def otp_key(self, event, i):
-        if event.keysym in ("BackSpace", "Return", "Tab", "Shift_L", "Shift_R"):
+    def tick_otp(self):
+        if not hasattr(self, "otp_canvas") or not self.otp_canvas.winfo_exists():
             return
-        digits = "".join(ch for ch in self.otp_boxes[i].get() if ch.isdigit())
-        self.otp_boxes[i].delete(0, tk.END)
-        if not digits:
-            return
-        for k, ch in enumerate(digits):
-            if i + k < 6:
-                self.otp_boxes[i + k].delete(0, tk.END)
-                self.otp_boxes[i + k].insert(0, ch)
-        self.otp_boxes[min(i + len(digits), 5)].focus_set()
-
-    def otp_back(self, i):
-        if self.otp_boxes[i].get() == "" and i > 0:
-            self.otp_boxes[i - 1].delete(0, tk.END)
-            self.otp_boxes[i - 1].focus_set()
-
-    def otp_value(self):
-        return "".join(e.get() for e in self.otp_boxes)
-
-    def refresh_banner(self):
-        self.otp_banner.config(
-            text=f"Your verification code is  {self.otp}\n"
-                 "(A real system would send this by SMS or email.)")
+        left = OTP_LIFE - int(time.time() - self.otp_started)
+        if left <= 0:
+            self.otp_canvas.itemconfig(self.otp_countdown_id,
+                                       text="Token expired. Click Resend Code to generate a new OTP.", fill="#fb7185")
+        else:
+            self.otp_canvas.itemconfig(self.otp_countdown_id,
+                                       text=f"⏳ Token expires in {left // 60:02d}:{left % 60:02d}", fill="#fbbf24")
+            self.otp_job = self.after(1000, self.tick_otp)
 
     def resend_otp(self):
-        self.new_otp()
-        self.refresh_banner()
-        for e in self.otp_boxes:
-            e.delete(0, tk.END)
-        self.otp_boxes[0].focus_set()
-        self.set_msg("A new OTP has been sent.", MINT)
-
-    def tick(self):
-        left = OTP_LIFE - int(time.time() - self.otp_time)
-        if left <= 0:
-            self.countdown.config(text="OTP expired. Click Resend OTP.", fg=DANGER)
-        else:
-            self.countdown.config(text=f"Code expires in {left // 60}:{left % 60:02d}", fg=MUTED)
-        self.after_id = self.after(1000, self.tick)
+        self.otp = f"{random.SystemRandom().randint(0, 999999):06d}"
+        self.otp_started = time.time()
+        self.otp_attempts = 0
+        self.otp_canvas.itemconfig(self.otp_demo_canvas_id, text=f"•  {self.otp}  •   (shown for testing)")
+        self.otp_entry.delete(0, tk.END)
+        self.otp_canvas.itemconfig(self.otp_msg_id, text="")
+        if self.otp_job:
+            self.after_cancel(self.otp_job)
+            self.otp_job = None
+        self.tick_otp()
 
     def verify_otp(self):
-        if time.time() - self.otp_time > OTP_LIFE:
-            self.set_msg("OTP expired. Please resend.")
+        if time.time() - self.otp_started > OTP_LIFE:
+            self.otp_canvas.itemconfig(self.otp_msg_id, text="OTP has expired. Please request a new token.")
             return
-        if self.otp_value() == self.otp:
+        if hmac.compare_digest(self.otp_entry.get().strip(), self.otp):
             self.show_candidates()
             return
-        self.attempts += 1
-        if self.attempts >= 3:
-            self.notify("Too many attempts", "You entered a wrong OTP three times.\n"
-                        "Please log in again to get a new code.", DANGER, "✕")
-            self.show_login()
+        self.otp_attempts += 1
+        if self.otp_attempts >= 3:
+            messagebox.showerror("Verification Blocked", "Too many incorrect attempts. Please log in again.")
+            self.show_login("voter")
         else:
-            self.set_msg(f"Wrong OTP. {3 - self.attempts} attempts left.")
+            self.otp_canvas.itemconfig(self.otp_msg_id,
+                                       text=f"Incorrect OTP. {3 - self.otp_attempts} attempt(s) remaining.")
 
-    # =============== VOTING SCREEN ===============
+    # =========================================================================
+    # STEP 3: CANDIDATE VOTING BALLOT (Blended with vote.png Liquid Waves)
+    # =========================================================================
     def show_candidates(self):
-        right = self.build_shell(2)
+        self.clear()
+        self.current_screen = "vote"
+        canvas, w, h = self.create_screen_canvas("vote.png")
+        self.vote_canvas = canvas
 
-        tk.Label(right, text="Choose your candidate", font=(FONT, 28, "bold"),
-                 fg=TEXT, bg=CARD).pack(anchor="w")
-        tk.Label(right, text="Tap a card to select, then review and submit. Your vote is final.",
-                 fg=MUTED, bg=CARD, font=BODY).pack(anchor="w", pady=(2, 10))
+        card_w, card_h = 680, 580
+        card_x = (w - card_w) // 2
+        card_y = (h - card_h) // 2
+        card_cx = card_x + card_w // 2
 
-        cands = q("SELECT id, name, party FROM candidates ORDER BY id")
-        self.choice = None
-        self.cards = {}
-        if not cands:
-            tk.Label(right, text="No candidates have been added yet.\nPlease contact the "
-                     "administrator.", fg=AMBER, bg=CARD, font=BODY, justify="left"
-                     ).pack(anchor="w", pady=20)
-            GradButton(right, "Back to login", self.show_login, stops=(FIELD, "#1f2866")).pack()
-            return
+        # Glass outline floating over liquid waves
+        canvas.create_rectangle(card_x, card_y, card_x + card_w, card_y + card_h,
+                                outline=BORDER, width=1.5)
+        canvas.create_line(card_x, card_y, card_x + card_w, card_y, fill=MAGENTA, width=3)
 
-        GradButton(right, "Review & Submit Vote  →", self.cast_vote,
-                   stops=(PINK, VIOLET)).pack(side="bottom", pady=(6, 0))
-        self.make_msg(right, side="bottom")
+        # Header typography directly on wallpaper
+        canvas.create_text(card_x + 30, card_y + 34, text="OFFICIAL BALLOT",
+                           fill=CYAN, font=(FONT, 10, "bold"), anchor="w")
+        canvas.create_text(card_x + 30, card_y + 64, text="Cast Your Official Vote",
+                           fill=TEXT, font=(FONT, 22, "bold"), anchor="w")
+        canvas.create_text(card_x + 30, card_y + 94,
+                           text=f"Voter: {self.current_voter[1]} ({self.current_voter[0]})  •  Select one candidate to cast your ballot.",
+                           fill=MUTED, font=(FONT, 10), anchor="w")
 
-        sf = ScrollFrame(right)
-        sf.pack(fill="both", expand=True)
-        for idx, (cid, name, party) in enumerate(cands):
-            color = CAND_COLORS[idx % len(CAND_COLORS)]
-            card = tk.Frame(sf.inner, bg=FIELD, highlightthickness=2,
-                            highlightbackground=BORDER, cursor="hand2")
-            card.pack(fill="x", pady=6, padx=(0, 6))
-            stripe = tk.Frame(card, bg=color, width=6)
-            stripe.pack(side="left", fill="y")
-            av = tk.Canvas(card, width=52, height=52, bg=FIELD, highlightthickness=0)
-            av.create_oval(2, 2, 50, 50, fill=color, outline="")
-            av.create_text(26, 26, text=name[0], fill="white", font=(FONT, 19, "bold"))
-            av.pack(side="left", padx=14, pady=11)
-            info = tk.Frame(card, bg=FIELD)
-            info.pack(side="left")
-            n_lbl = tk.Label(info, text=name, bg=FIELD, fg=TEXT, font=(FONT, 15, "bold"))
-            n_lbl.pack(anchor="w")
-            p_lbl = tk.Label(info, text=party, bg=FIELD, fg=color, font=(FONT, 12))
-            p_lbl.pack(anchor="w")
-            ind = tk.Canvas(card, width=28, height=28, bg=FIELD, highlightthickness=0)
-            ind.pack(side="right", padx=(6, 18))
-            badge = tk.Label(card, text="", bg=FIELD, fg=color, font=(FONT, 10, "bold"))
-            badge.pack(side="right")
+        self.selected_candidate = None
+        self.candidate_widgets = {}
 
-            self.cards[cid] = dict(card=card, ind=ind, badge=badge, color=color,
-                                   widgets=[card, av, info, n_lbl, p_lbl, badge, ind])
-            self.draw_indicator(ind, MUTED, False)
-            for w in (card, stripe, av, info, n_lbl, p_lbl, badge, ind):
-                w.bind("<Button-1>", lambda e, c=cid: self.select_candidate(c))
+        candidates = db_query("SELECT id, name, party FROM candidates ORDER BY id")
+        items_frame = tk.Frame(self.root, bg="#090e22", bd=0)
+        canvas.create_window(card_cx, card_y + 245, window=items_frame, width=card_w - 60, height=260)
 
-    @staticmethod
-    def draw_indicator(canvas, color, selected):
-        canvas.delete("all")
-        canvas.create_oval(3, 3, 25, 25, outline=color, width=2)
-        if selected:
-            canvas.create_oval(9, 9, 19, 19, fill=color, outline=color)
+        if not candidates:
+            tk.Label(items_frame, text="No candidates registered yet. Contact election administrator.",
+                     fg=AMBER, bg="#090e22", font=(FONT, 12, "bold")).pack(pady=40)
+        else:
+            for i, (cid, name, party) in enumerate(candidates):
+                color = CANDIDATE_COLORS[i % len(CANDIDATE_COLORS)]
+                row = tk.Frame(items_frame, bg="#0a1228", highlightthickness=1.5,
+                               highlightbackground=BORDER_SUBTLE, cursor="hand2")
+                row.pack(fill="x", pady=6)
+
+                tk.Frame(row, bg=color, width=5).pack(side="left", fill="y")
+                avatar = tk.Canvas(row, width=44, height=44, bg="#0a1228", highlightthickness=0)
+                avatar.create_oval(3, 3, 41, 41, fill=color, outline="")
+                avatar.create_text(22, 22, text=(name[:1] or "?").upper(), fill="white", font=(FONT, 15, "bold"))
+                avatar.pack(side="left", padx=12, pady=6)
+
+                info = tk.Frame(row, bg="#0a1228")
+                info.pack(side="left", fill="x", expand=True, pady=6)
+                tk.Label(info, text=name, font=(FONT, 14, "bold"), fg=TEXT, bg="#0a1228").pack(anchor="w")
+                tk.Label(info, text=party, font=(FONT, 10, "bold"), fg=color, bg="#0a1228").pack(anchor="w")
+
+                indicator = tk.Label(row, text="○", font=(FONT, 20, "bold"), fg=MUTED, bg="#0a1228")
+                indicator.pack(side="right", padx=18)
+
+                widgets = [row, avatar, info, *info.winfo_children(), indicator]
+                self.candidate_widgets[cid] = (row, indicator, color, widgets)
+                for widget in widgets:
+                    widget.bind("<Button-1>", lambda e, c=cid: self.select_candidate(c))
+
+        # Warning/error message on canvas
+        self.vote_msg_id = canvas.create_text(card_x + 30, card_y + 400, text="",
+                                              fill=RED, font=(FONT, 10, "bold"), anchor="w")
+
+        # Action submit button
+        submit_btn = tk.Button(self.root, text="⚡  Confirm and Submit Official Vote", command=self.cast_vote,
+                               bg=SKYBLUE, fg="#082033", activebackground=SKYBLUE_HOVER,
+                               activeforeground="white", relief="flat", bd=0,
+                               font=(FONT, 12, "bold"), cursor="hand2")
+        canvas.create_window(card_cx, card_y + 440, window=submit_btn, width=card_w - 60, height=44)
+
+        # Cancel link
+        logout_btn = canvas.create_text(card_x + card_w - 30, card_y + 490, text="✕  Cancel & Log out",
+                                        fill=MUTED, font=(FONT, 10), anchor="e")
+        self.make_canvas_clickable(canvas, logout_btn, MUTED, TEXT, lambda: self.show_login("voter"))
 
     def select_candidate(self, cid):
-        self.choice = cid
-        for c, d in self.cards.items():
-            on = c == cid
-            bg = blend(FIELD, d["color"], 0.16) if on else FIELD
-            for w in d["widgets"]:
-                w.config(bg=bg)
-            d["card"].config(highlightbackground=d["color"] if on else BORDER)
-            d["badge"].config(text="SELECTED" if on else "")
-            self.draw_indicator(d["ind"], d["color"] if on else MUTED, on)
-        self.set_msg("")
+        self.selected_candidate = cid
+        for candidate_id, (row, indicator, color, widgets) in self.candidate_widgets.items():
+            selected = candidate_id == cid
+            bg_val = "#162244" if selected else "#0a1228"
+            for widget in widgets:
+                try:
+                    widget.config(bg=bg_val)
+                except tk.TclError:
+                    pass
+            row.config(highlightbackground=color if selected else BORDER_SUBTLE)
+            indicator.config(text="●  SELECTED" if selected else "○", fg=color if selected else MUTED,
+                             font=(FONT, 10 if selected else 20, "bold"))
+        self.vote_canvas.itemconfig(self.vote_msg_id, text="")
 
     def cast_vote(self):
-        if self.choice is None:
-            self.set_msg("Please select a candidate first.")
+        if self.selected_candidate is None:
+            self.vote_canvas.itemconfig(self.vote_msg_id, text="Please select one candidate to proceed.")
             return
-        rows = q("SELECT name, party FROM candidates WHERE id=?", (self.choice,))
-        if not rows:
-            self.set_msg("That candidate no longer exists. Please pick again.")
+        row = db_query("SELECT name, party FROM candidates WHERE id=?", (self.selected_candidate,))
+        if not row:
+            self.vote_canvas.itemconfig(self.vote_msg_id, text="Candidate not found. Please select again.")
             return
-        color = self.cards[self.choice]["color"]
-        ok = self.ask("Confirm your vote", "Confirm your vote",
-                      "You are about to cast your vote for the candidate shown above.\n"
-                      "This action is final and cannot be changed.",
-                      "Confirm Vote", "Go Back", color, candidate=(rows[0][0], rows[0][1], color))
-        if not ok:
-            return
-        if not election_open():
-            self.notify("Election closed", "The administrator closed the election "
-                        "before your vote was submitted.", DANGER, "✕")
-            self.show_login()
+        if not messagebox.askyesno("Confirm Official Ballot",
+                                   f"Submit your official ballot for:\n\n{row[0][0]} ({row[0][1]})?\n\nThis action cannot be undone."):
             return
 
-        con = get_db()
-        cur = con.cursor()
-        # Only succeeds while has_voted is still 0 -> one vote per voter
-        cur.execute("UPDATE voters SET has_voted=1 WHERE voter_id=? AND has_voted=0",
-                    (self.current_voter[0],))
-        if cur.rowcount == 0:
+        con = connect_db()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute("UPDATE voters SET has_voted=1 WHERE voter_id=? AND has_voted=0",
+                              (self.current_voter[0],))
+            if cur.rowcount != 1:
+                con.rollback()
+                messagebox.showerror("Vote Failed", "This voter ID has already cast a ballot.")
+                self.show_login("voter")
+                return
+            cur = con.execute("UPDATE candidates SET votes=votes+1 WHERE id=?", (self.selected_candidate,))
+            if cur.rowcount != 1:
+                con.rollback()
+                messagebox.showerror("Vote Failed", "Selected candidate was not found.")
+                return
+            con.commit()
+        except sqlite3.Error as exc:
+            con.rollback()
+            messagebox.showerror("Database Error", f"Vote could not be committed:\n{exc}")
+            return
+        finally:
             con.close()
-            self.notify("Already voted", "Our records show you have already voted.",
-                        DANGER, "✕")
-            self.show_login()
-            return
-        cur.execute("UPDATE candidates SET votes = votes + 1 WHERE id=?", (self.choice,))
-        con.commit()
-        con.close()
-        self.show_done()
 
-    # =============== THANK YOU + CONFETTI ===============
-    def show_done(self):
-        right = self.build_shell(3)
-        name = self.current_voter[1]
+        voter_name = self.current_voter[1]
+        receipt = uuid.uuid4().hex[:10].upper()
         self.current_voter = None
+        self.show_done(voter_name, receipt)
 
-        self.confetti = tk.Canvas(right, width=500, height=120, bg=CARD, highlightthickness=0)
-        self.confetti.pack(anchor="w")
-        self.confetti.create_oval(4, 14, 92, 102, fill=MINT, outline="")
-        self.confetti.create_text(48, 58, text="✓", fill="white", font=(FONT, 46, "bold"))
-        self.particles = []
-        for _ in range(60):
-            x, y = random.randint(110, 495), random.randint(-120, 0)
-            size = random.randint(5, 10)
-            pid = self.confetti.create_rectangle(x, y, x + size, y + size,
-                                                 fill=random.choice(CAND_COLORS), outline="")
-            self.particles.append([pid, random.uniform(1.5, 4), random.uniform(-1, 1)])
-        self.frames = 0
-        self.animate_confetti()
+    # =========================================================================
+    # STEP 4: CONFIRMATION RECEIPT & RESULTS (Blended with result.png)
+    # =========================================================================
+    def show_done(self, name, receipt):
+        self.clear()
+        self.current_screen = "done"
+        canvas, w, h = self.create_screen_canvas("vote.png")
 
-        tk.Label(right, text="Vote recorded!", font=H1, fg=TEXT, bg=CARD).pack(anchor="w", pady=(6, 0))
-        tk.Label(right, text=f"Thank you, {name}. Your vote has been securely saved.",
-                 fg=MUTED, bg=CARD, font=BODY).pack(anchor="w", pady=(2, 12))
-        tk.Label(right, text=f"Confirmation code:  {uuid.uuid4().hex[:10].upper()}",
-                 fg=CYAN, bg=CARD, font=(FONT, 14, "bold")).pack(anchor="w", pady=(0, 22))
+        card_w, card_h = 560, 420
+        card_x = (w - card_w) // 2
+        card_y = (h - card_h) // 2
+        card_cx = card_x + card_w // 2
 
-        if self.can_view_results():
-            GradButton(right, "View Results", self.show_results).pack(pady=(0, 10))
-        GradButton(right, "Log out", self.show_login, stops=(FIELD, "#1f2866")).pack()
+        # Glass container
+        canvas.create_rectangle(card_x, card_y, card_x + card_w, card_y + card_h,
+                                outline=GREEN, width=1.5)
+        canvas.create_line(card_x, card_y, card_x + card_w, card_y, fill=CYAN, width=3)
 
-    def animate_confetti(self):
-        if self.frames > 110:
-            self.fx_id = None
+        # Huge glowing checkmark & typography
+        canvas.create_text(card_cx, card_y + 55, text="✓", fill=GREEN, font=(FONT, 52, "bold"))
+        canvas.create_text(card_cx, card_y + 115, text=f"Thank you, {name}!", fill=TEXT, font=(FONT, 24, "bold"))
+        canvas.create_text(card_cx, card_y + 145,
+                           text="Your vote has been cryptographically signed and stored in the database.",
+                           fill=MUTED, font=(FONT, 11))
+
+        # Digital HUD Receipt Badge
+        canvas.create_rectangle(card_x + 35, card_y + 175, card_x + card_w - 35, card_y + 245,
+                                outline=CYAN, width=1.5)
+        canvas.create_text(card_cx, card_y + 195, text="OFFICIAL AUDIT CONFIRMATION RECEIPT",
+                           fill=CYAN, font=(FONT, 9, "bold"))
+        canvas.create_text(card_cx, card_y + 222, text=f"HASH: #{receipt}  •  STATUS: VERIFIED",
+                           fill="white", font=(FONT, 14, "bold"))
+
+        # Action Buttons
+        results_btn = tk.Button(self.root, text="View Live Election Results  ↗", command=self.show_results,
+                                bg=SKYBLUE, fg="#082033", activebackground=SKYBLUE_HOVER,
+                                activeforeground="white", relief="flat", bd=0,
+                                font=(FONT, 12, "bold"), cursor="hand2")
+        canvas.create_window(card_cx, card_y + 285, window=results_btn, width=card_w - 70, height=44)
+
+        home_btn = tk.Button(self.root, text="Log out to Home", command=lambda: self.show_login("voter"),
+                             bg="#0c1630", fg="#cbd5e1", activebackground="#1e293b",
+                             activeforeground="white", relief="flat", bd=0,
+                             font=(FONT, 11, "bold"), cursor="hand2")
+        canvas.create_window(card_cx, card_y + 342, window=home_btn, width=card_w - 70, height=40)
+
+    # =========================================================================
+    # STEP 4B: LIVE RESULTS WINDOW (Blended with result.png Charts & Waves)
+    # =========================================================================
+    def draw_bar_chart(self, canvas, items):
+        canvas.delete("all")
+        canvas.update_idletasks()
+        w = max(canvas.winfo_width(), 400)
+        h = max(canvas.winfo_height(), 200)
+        if not items:
+            canvas.create_text(w / 2, h / 2, text="No candidate records found", fill=MUTED, font=(FONT, 12))
             return
-        for p in self.particles:
-            self.confetti.move(p[0], p[2], p[1])
-        self.frames += 1
-        self.fx_id = self.after(30, self.animate_confetti)
+        max_value = max([item[1] for item in items] + [1])
+        row_h = max(42, (h - 20) // len(items))
+        label_width = 150
+        for i, (name, value, color) in enumerate(items):
+            y = 14 + i * row_h
+            canvas.create_text(10, y + 12, text=name[:18], fill=TEXT, anchor="w", font=(FONT, 11, "bold"))
+            x0, x1 = label_width, w - 70
+            canvas.create_rectangle(x0, y + 4, x1, y + 24, fill="#0c142b", outline="")
+            bar_end = x0 + (x1 - x0) * value / max_value
+            if value:
+                canvas.create_rectangle(x0, y + 4, bar_end, y + 24, fill=color, outline="")
+            canvas.create_text(w - 14, y + 14, text=str(value), fill=TEXT, anchor="e", font=(FONT, 11, "bold"))
 
-    # =============== RESULTS DASHBOARD ===============
     def show_results(self):
-        if not self.can_view_results():
-            self.notify("Results are hidden", "The administrator has not published "
-                        "the results yet.")
+        if not (self.admin_logged_in or setting("results_public", "1") == "1" or not is_election_open()):
+            messagebox.showinfo("Results Protected", "The administrator has not made election results public.")
             return
-        if self.res_win is not None and self.res_win.winfo_exists():
-            self.res_win.lift()
-        else:
-            self.res_win = tk.Toplevel(self, bg=CARD)
-            self.res_win.title("Election Results")
-            self.res_win.geometry("980x730")
-        self.draw_results()
+        if self.result_window is not None and self.result_window.winfo_exists():
+            self.result_window.destroy()
 
-    def draw_results(self):
-        win = self.res_win
-        for w in win.winfo_children():
-            w.destroy()
-        st = election_stats()
-        data = st["cands"]
-        names = [d[1] for d in data]
-        votes = [d[3] for d in data]
-        colors = [CAND_COLORS[i % len(CAND_COLORS)] for i in range(len(data))]
-        total = st["votes"]
-        top = max(votes) if votes else 0
-        closed = not election_open()
+        win = tk.Toplevel(self)
+        self.result_window = win
+        win.title("SecureVote | Election Audit & Results")
+        win.geometry("960x720")
+        win.configure(bg=BG)
 
-        head = tk.Frame(win, bg=CARD)
-        head.pack(fill="x", padx=30, pady=(22, 0))
-        left = tk.Frame(head, bg=CARD)
-        left.pack(side="left")
-        tk.Label(left, text="Election Results", fg=TEXT, bg=CARD, font=(FONT, 26, "bold")
-                 ).pack(anchor="w")
-        chip(left, "●  FINAL RESULTS" if closed else "●  LIVE",
-             AMBER if closed else MINT).pack(anchor="w", pady=(4, 0))
-        GradButton(head, "Export CSV", self.export_results, width=130, height=38,
-                   stops=(FIELD, "#1f2866"), bg=CARD, size=12).pack(side="right")
-        GradButton(head, "Refresh", self.draw_results, width=110, height=38,
-                   stops=(CYAN, VIOLET), bg=CARD, size=12).pack(side="right", padx=10)
+        w, h = 960, 720
+        canvas = tk.Canvas(win, width=w, height=h, bg=BG, highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
 
-        # winner / leader banner
-        leaders = [names[i] for i in range(len(data)) if votes[i] == top] if total else []
-        if not total:
-            btxt, bsub, bcol = "No votes cast yet", "Results will appear as votes come in.", MUTED
-        elif len(leaders) > 1:
-            btxt, bsub, bcol = "It's a tie", " and ".join(leaders) + f" have {top} votes each.", AMBER
-        else:
-            pct = top * 100 / total
-            btxt = leaders[0]
-            bsub = f"{top} votes  •  {pct:.0f}% of all votes"
-            bcol = AMBER
-        banner = tk.Frame(win, bg=FIELD, highlightthickness=2, highlightbackground=bcol)
-        banner.pack(fill="x", padx=30, pady=(14, 10))
-        tk.Label(banner, text=("WINNER" if closed and len(leaders) == 1 else
-                               "LEADING" if len(leaders) == 1 else "STATUS"),
-                 fg=bcol, bg=FIELD, font=CAPTION).pack(anchor="w", padx=20, pady=(12, 0))
-        tk.Label(banner, text=btxt, fg=TEXT, bg=FIELD, font=(FONT, 22, "bold")
-                 ).pack(anchor="w", padx=20)
-        tk.Label(banner, text=bsub, fg=MUTED, bg=FIELD, font=BODY
-                 ).pack(anchor="w", padx=20, pady=(0, 12))
+        # Loads result.png or results.png directly
+        photo = load_image_tk("result.png", w, h) or load_image_tk("results.png", w, h)
+        if photo:
+            canvas.create_image(0, 0, image=photo, anchor="nw")
+            canvas.bg_photo_ref = photo
 
-        # stat tiles
-        second = sorted(votes, reverse=True)[1] if len(votes) > 1 else 0
-        tiles = [("TOTAL VOTES", str(total), CYAN),
-                 ("TURNOUT", f"{st['turnout']:.0f}%  ({st['voted']}/{st['total']})", MINT),
-                 ("YET TO VOTE", str(st["remaining"]), AMBER),
-                 ("LEAD MARGIN", str(top - second) if total else "-", PINK)]
-        row = tk.Frame(win, bg=CARD)
-        row.pack(fill="x", padx=24)
-        for i, (cap, val, col) in enumerate(tiles):
-            box = tk.Frame(row, bg=FIELD, highlightthickness=2, highlightbackground=col)
-            box.grid(row=0, column=i, sticky="nsew", padx=6)
-            row.grid_columnconfigure(i, weight=1, uniform="t")
-            tk.Label(box, text=cap, bg=FIELD, fg=MUTED, font=CAPTION).pack(pady=(10, 0))
-            tk.Label(box, text=val, bg=FIELD, fg=col, font=(FONT, 17, "bold")).pack(pady=(0, 10))
+        # Glass container for results overlay
+        card_w, card_h = 880, 640
+        card_x = (w - card_w) // 2
+        card_y = (h - card_h) // 2
+        card_cx = card_x + card_w // 2
 
-        # turnout bar
-        bar = tk.Canvas(win, height=10, bg=CARD, highlightthickness=0)
-        bar.pack(fill="x", padx=30, pady=(12, 0))
+        canvas.create_rectangle(card_x, card_y, card_x + card_w, card_y + card_h,
+                                outline=BORDER, width=1.5)
+        canvas.create_line(card_x, card_y, card_x + card_w, card_y, fill=CYAN, width=3)
 
-        def draw_bar(e, pct=st["turnout"]):
-            bar.delete("all")
-            bar.create_rectangle(0, 0, e.width, 10, fill=FIELD, outline="")
-            if pct > 0:
-                bar.create_rectangle(0, 0, e.width * pct / 100, 10, fill=CYAN, outline="")
-        bar.bind("<Configure>", draw_bar)
+        # Header typography
+        canvas.create_text(card_x + 30, card_y + 34, text="📊  ELECTION AUDIT & RESULTS",
+                           fill=CYAN, font=(FONT, 10, "bold"), anchor="w")
+        canvas.create_text(card_x + 30, card_y + 64, text="Live Election Turnout & Candidate Standings",
+                           fill=TEXT, font=(FONT, 20, "bold"), anchor="w")
+        canvas.create_text(card_x + 30, card_y + 92,
+                           text="Cryptographically verified participation breakdown and vote counts",
+                           fill=MUTED, font=(FONT, 10), anchor="w")
 
-        # charts
-        fig = Figure(figsize=(9.2, 3.3), dpi=100, facecolor=CARD)
-        ax1 = fig.add_subplot(121, facecolor=CARD)
-        if total:
-            ax1.pie(votes, colors=colors, startangle=90, counterclock=False,
-                    wedgeprops=dict(width=0.34, edgecolor=CARD, linewidth=3))
-        else:
-            ax1.pie([1], colors=[BORDER], wedgeprops=dict(width=0.34, edgecolor=CARD))
-        ax1.text(0, 0.07, str(total), ha="center", va="center", color=TEXT,
-                 fontsize=28, fontweight="bold")
-        ax1.text(0, -0.2, "TOTAL VOTES", ha="center", va="center", color=MUTED, fontsize=9)
+        st = get_stats()
 
-        order = sorted(range(len(data)), key=lambda i: votes[i])
-        ax2 = fig.add_subplot(122, facecolor=CARD)
-        ax2.barh([names[i] for i in order], [votes[i] for i in order],
-                 color=[colors[i] for i in order], height=0.5)
-        peak = max(top, 1)
-        for y, i in enumerate(order):
-            pct = votes[i] * 100 / total if total else 0
-            ax2.text(votes[i] + peak * 0.04, y, f"{votes[i]}  ({pct:.0f}%)",
-                     va="center", color=TEXT, fontsize=10)
-        ax2.set_xlim(0, peak * 1.6)
-        ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax2.tick_params(colors=MUTED, labelsize=10, length=0)
-        for spine in ax2.spines.values():
-            spine.set_visible(False)
-        ax2.xaxis.grid(True, color=BORDER, linewidth=0.6)
-        ax2.set_axisbelow(True)
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=win)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=(4, 12))
+        # Stats tiles (Sleek HUD widgets)
+        stats_frame = tk.Frame(win, bg="#070f24", bd=0)
+        canvas.create_window(card_cx, card_y + 145, window=stats_frame, width=card_w - 60, height=75)
+
+        for title, value, color in [
+            ("TOTAL VOTES", str(st["votes"]), CYAN),
+            ("TURNOUT", f"{st['turnout']:.0f}%", GREEN),
+            ("REGISTERED", str(st["total"]), PURPLE),
+            ("YET TO VOTE", str(st["remaining"]), AMBER),
+        ]:
+            tile = tk.Frame(stats_frame, bg="#0b1736", highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+            tile.pack(side="left", fill="both", expand=True, padx=4)
+            tk.Frame(tile, bg=color, height=3).pack(fill="x")
+            tk.Label(tile, text=title, font=(FONT, 9, "bold"), fg=MUTED, bg="#0b1736").pack(pady=(8, 2))
+            tk.Label(tile, text=value, font=(FONT, 18, "bold"), fg=color, bg="#0b1736").pack(pady=(0, 8))
+
+        # Dynamic Candidate Bar Chart
+        chart_wrap = tk.Frame(win, bg="#0b1736", highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+        canvas.create_window(card_cx, card_y + 345, window=chart_wrap, width=card_w - 60, height=270)
+
+        tk.Label(chart_wrap, text="Votes by Candidate (Live)", font=(FONT, 12, "bold"),
+                 fg=TEXT, bg="#0b1736").pack(anchor="w", padx=16, pady=(12, 4))
+        chart_canvas = tk.Canvas(chart_wrap, bg="#0b1736", highlightthickness=0, height=200)
+        chart_canvas.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        items = [(name, votes, CANDIDATE_COLORS[i % len(CANDIDATE_COLORS)])
+                 for i, (_, name, party, votes) in enumerate(st["candidates"])]
+        chart_canvas.bind("<Configure>", lambda e: self.draw_bar_chart(chart_canvas, items))
+
+        # Export CSV Button
+        export_btn = tk.Button(win, text="📥  Export Audit Report (CSV)", command=self.export_results,
+                               bg=SKYBLUE, fg="#082033", activebackground=SKYBLUE_HOVER,
+                               activeforeground="white", relief="flat", bd=0,
+                               font=(FONT, 11, "bold"), cursor="hand2")
+        canvas.create_window(card_cx, card_y + 580, window=export_btn, width=240, height=40)
 
     def export_results(self):
         path = filedialog.asksaveasfilename(
-            parent=self.res_win, defaultextension=".csv", initialfile="election_results.csv",
-            filetypes=[("CSV file", "*.csv")])
+            parent=self, title="Export election results", defaultextension=".csv",
+            initialfile="election_results.csv", filetypes=[("CSV file", "*.csv")]
+        )
         if not path:
             return
-        st = election_stats()
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(["Candidate", "Party", "Votes", "Percent"])
-            for _, name, party, votes in st["cands"]:
-                w.writerow([name, party, votes,
-                            round(votes * 100 / st["votes"], 1) if st["votes"] else 0])
-            w.writerow([])
-            w.writerow(["Registered voters", st["total"]])
-            w.writerow(["Votes cast", st["voted"]])
-            w.writerow(["Turnout %", round(st["turnout"], 1)])
+        st = get_stats()
+        with open(path, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["Candidate", "Party", "Votes", "Percent"])
+            for _, name, party, votes in st["candidates"]:
+                percent = round(votes * 100 / st["votes"], 1) if st["votes"] else 0
+                writer.writerow([name, party, votes, percent])
+            writer.writerow([])
+            writer.writerow(["Registered voters", st["total"]])
+            writer.writerow(["Voters who voted", st["voted"]])
+            writer.writerow(["Turnout percent", round(st["turnout"], 1)])
+        messagebox.showinfo("Export complete", f"Results exported to:\n{path}")
 
-    # =============== ADMIN PANEL ===============
-    TABS = [("Overview", "overview"), ("Candidates", "candidates"),
-            ("Voters", "voters"), ("Election", "election")]
+    # =========================================================================
+    # DIALOGS (REGISTER, ABOUT, FAQ)
+    # =========================================================================
+    def show_register_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Voter Registration | SecureVote")
+        win.geometry("460x420")
+        win.configure(bg=PANEL)
+        win.transient(self)
+        win.grab_set()
 
+        self.label(win, "VOTER REGISTRATION", 10, CYAN, True, bg=PANEL).pack(anchor="w", padx=28, pady=(22, 4))
+        self.label(win, "Register New Voter", 20, TEXT, True, bg=PANEL).pack(anchor="w", padx=28)
+        self.label(win, "Create a demo voter ID and password to participate.", 10, MUTED, bg=PANEL).pack(anchor="w", padx=28, pady=(4, 16))
+
+        suggested_id = f"V{random.randint(100, 999)}"
+        self.label(win, "VOTER ID", 9, CYAN, True, bg=PANEL).pack(anchor="w", padx=28)
+        wrap_id, ent_id = self.entry(win)
+        wrap_id.pack(fill="x", padx=28, pady=(0, 10))
+        ent_id.insert(0, suggested_id)
+
+        self.label(win, "FULL NAME", 9, CYAN, True, bg=PANEL).pack(anchor="w", padx=28)
+        wrap_name, ent_name = self.entry(win)
+        wrap_name.pack(fill="x", padx=28, pady=(0, 10))
+
+        self.label(win, "PASSWORD", 9, CYAN, True, bg=PANEL).pack(anchor="w", padx=28)
+        wrap_pw, ent_pw = self.entry(win, show="*")
+        wrap_pw.pack(fill="x", padx=28, pady=(0, 16))
+
+        def register():
+            vid = ent_id.get().strip().upper()
+            vname = ent_name.get().strip()
+            vpw = ent_pw.get().strip()
+            if not vid or not vname or not vpw:
+                messagebox.showwarning("Incomplete Details", "Please fill in all fields.", parent=win)
+                return
+            if db_query("SELECT voter_id FROM voters WHERE voter_id=?", (vid,)):
+                messagebox.showerror("Voter Exists", f"Voter ID {vid} is already registered!", parent=win)
+                return
+            db_execute("INSERT INTO voters VALUES (?, ?, ?, 0)", (vid, vname, vpw))
+            messagebox.showinfo("Registration Complete", f"Voter {vname} registered successfully!\nID: {vid}\nPassword: {vpw}", parent=win)
+            win.destroy()
+            if hasattr(self, "login_id") and self.login_id.winfo_exists():
+                self.login_id.delete(0, tk.END)
+                self.login_id.insert(0, vid)
+                self.login_password.delete(0, tk.END)
+                self.login_password.insert(0, vpw)
+
+        self.button(win, "Register Voter", register, SKYBLUE).pack(fill="x", padx=28, pady=(0, 10))
+
+    def show_about_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("About SecureVote")
+        win.geometry("520x440")
+        win.configure(bg=PANEL)
+        win.transient(self)
+
+        self.label(win, "ABOUT SECUREVOTE", 10, CYAN, True, bg=PANEL).pack(anchor="w", padx=28, pady=(24, 4))
+        self.label(win, "3D Liquid Voting Architecture", 20, TEXT, True, bg=PANEL).pack(anchor="w", padx=28)
+        info_text = (
+            "SecureVote is an interactive voting management and election demonstration "
+            "system styled with an organic 3D purple liquid color gradient theme.\n\n"
+            "• Two-Factor Authentication: Timed 6-digit OTP verification.\n"
+            "• Double-Voting Prevention: Atomic SQLite transactions with IMMEDIATE locks.\n"
+            "• Audit Proof: Instant cryptographic UUID balloting receipts.\n"
+            "• Real-Time Analytics: Live turnout visualizer and CSV export engine.\n"
+            "• Administrator Controls: Real-time candidate and voter management."
+        )
+        self.label(win, info_text, 11, MUTED, bg=PANEL, wraplength=460, justify="left").pack(fill="x", padx=28, pady=16)
+        self.button(win, "Close", win.destroy, PURPLE).pack(padx=28, pady=12, fill="x")
+
+    def show_faq_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Frequently Asked Questions | SecureVote")
+        win.geometry("540x480")
+        win.configure(bg=PANEL)
+        win.transient(self)
+
+        self.label(win, "HELP & FAQ", 10, CYAN, True, bg=PANEL).pack(anchor="w", padx=28, pady=(24, 4))
+        self.label(win, "Frequently Asked Questions", 20, TEXT, True, bg=PANEL).pack(anchor="w", padx=28, pady=(0, 12))
+        faqs = [
+            ("Q: How do I test the voting workflow?", "A: Log in with any demo ID (V001 to V005) and password '1234'. Then enter the on-screen OTP code."),
+            ("Q: Can a voter vote twice?", "A: No. SecureVote records the vote in an atomic transaction and prevents re-voting."),
+            ("Q: How do I access administrative controls?", "A: Click 'Switch to Admin', use username 'admin' and password 'admin123'."),
+            ("Q: Can I reset the election after testing?", "A: Yes. In the Admin Panel under 'Election Settings', click 'Reset Election'.")
+        ]
+        for q, a in faqs:
+            self.label(win, q, 11, CYAN, True, bg=PANEL).pack(anchor="w", padx=28, pady=(4, 1))
+            self.label(win, a, 10, MUTED, bg=PANEL, wraplength=480, justify="left").pack(anchor="w", padx=28, pady=(0, 8))
+        self.button(win, "Got it", win.destroy, PURPLE).pack(padx=28, pady=12, fill="x")
+
+    # =========================================================================
+    # ADMIN DASHBOARD
+    # =========================================================================
     def show_admin(self, tab="overview"):
         self.clear()
-        self.is_admin = True
-        self.admin_tab = tab
+        self.current_screen = "admin"
+        self.admin_logged_in = True
 
-        head = tk.Frame(self.card, bg=CARD)
-        head.pack(fill="x", padx=32, pady=(22, 0))
-        left = tk.Frame(head, bg=CARD)
-        left.pack(side="left")
-        tk.Label(left, text="Admin Panel", fg=TEXT, bg=CARD, font=(FONT, 26, "bold")).pack(anchor="w")
-        tk.Label(left, text="Manage candidates, voters and the election", fg=MUTED,
-                 bg=CARD, font=(FONT, 12)).pack(anchor="w")
-        right = tk.Frame(head, bg=CARD)
-        right.pack(side="right")
-        GradButton(right, "Log out", self.show_login, width=110, height=38,
-                   stops=(PINK, VIOLET), size=12).pack(anchor="e")
-        self.admin_msg = tk.Label(right, text="", bg=CARD, fg=MINT, font=SMALL)
-        self.admin_msg.pack(anchor="e", pady=(4, 0))
+        sidebar = tk.Frame(self.root, bg="#090f1d", width=240)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
 
-        bar = tk.Canvas(self.card, height=3, bg=CARD, highlightthickness=0)
-        bar.pack(fill="x", padx=32, pady=(10, 0))
-        bar.bind("<Configure>", lambda e: (bar.delete("deco"),
-                                           paint_gradient_bar(bar, e.width, 3, [VIOLET, PINK, CYAN])))
+        brand = tk.Frame(sidebar, bg="#090f1d")
+        brand.pack(fill="x", padx=22, pady=(26, 26))
+        tk.Label(brand, text="✓", bg=SKYBLUE, fg="#082033",
+                 font=(FONT, 16, "bold"), width=2, height=1).pack(side="left", padx=(0, 10))
+        tk.Label(brand, text="SecureVote", bg="#090f1d", fg=TEXT,
+                 font=(FONT, 16, "bold")).pack(side="left")
 
-        tabs = tk.Frame(self.card, bg=CARD)
-        tabs.pack(fill="x", padx=32, pady=(8, 0))
-        for title, key in self.TABS:
-            active = key == tab
-            cell = tk.Frame(tabs, bg=CARD)
-            cell.pack(side="left", padx=(0, 22))
-            lbl = tk.Label(cell, text=title, bg=CARD, cursor="hand2",
-                           fg=TEXT if active else MUTED, font=(FONT, 14, "bold" if active else "normal"))
-            lbl.pack()
-            tk.Frame(cell, bg=PINK if active else CARD, height=3).pack(fill="x", pady=(4, 0))
-            lbl.bind("<Button-1>", lambda e, k=key: self.show_admin(k))
+        tk.Label(sidebar, text="ADMINISTRATION", bg="#090f1d", fg=MUTED,
+                 font=(FONT, 9, "bold")).pack(anchor="w", padx=22, pady=(0, 12))
 
-        self.admin_body = tk.Frame(self.card, bg=CARD)
-        self.admin_body.pack(fill="both", expand=True, padx=32, pady=(12, 22))
-        getattr(self, "admin_" + tab)()
+        nav_items = [
+            ("overview", "▦", "Overview"),
+            ("candidates", "♙", "Candidates"),
+            ("voters", "☷", "Voter records"),
+            ("election", "⚙", "Election settings"),
+        ]
+        for key, glyph, title in nav_items:
+            active = tab == key
+            btn = tk.Button(
+                sidebar, text=f"  {glyph}    {title}", anchor="w",
+                command=lambda k=key: self.show_admin(k),
+                bg="#1a253d" if active else "#090f1d",
+                fg=CYAN if active else "#cbd5e1",
+                activebackground="#1a253d", activeforeground="white",
+                relief="flat", bd=0, cursor="hand2",
+                font=(FONT, 11, "bold" if active else "normal"),
+                padx=14, pady=13
+            )
+            btn.pack(fill="x", padx=12, pady=3)
 
-    def admin_flash(self, text, color=MINT):
-        if self.admin_msg is None or not self.admin_msg.winfo_exists():
+        spacer = tk.Frame(sidebar, bg="#090f1d")
+        spacer.pack(fill="both", expand=True)
+        tk.Frame(sidebar, bg=BORDER_SUBTLE, height=1).pack(fill="x", padx=18, pady=(0, 14))
+
+        tk.Label(sidebar, text="DEMO ENVIRONMENT", bg="#090f1d", fg=MUTED,
+                 font=(FONT, 9, "bold")).pack(anchor="w", padx=22)
+        tk.Label(sidebar, text="SQLite3 • Tkinter Only", bg="#090f1d", fg="#cbd5e1",
+                 font=(FONT, 9)).pack(anchor="w", padx=22, pady=(4, 18))
+
+        tk.Button(sidebar, text="↪  Log out", command=lambda: self.show_login("admin"),
+                  bg="#090f1d", fg=CORAL, activebackground="#1a253d",
+                  activeforeground="white", relief="flat", bd=0, cursor="hand2",
+                  font=(FONT, 11, "bold"), anchor="w", padx=22, pady=12).pack(fill="x", pady=(0, 12))
+
+        workspace = tk.Frame(self.root, bg=BG)
+        workspace.pack(side="left", fill="both", expand=True, padx=(26, 22), pady=22)
+
+        header = tk.Frame(workspace, bg=BG)
+        header.pack(fill="x", pady=(0, 20))
+        title_block = tk.Frame(header, bg=BG)
+        title_block.pack(side="left", fill="x", expand=True)
+        self.label(title_block, "ELECTION MANAGEMENT", 9, CYAN, True, bg=BG).pack(anchor="w")
+
+        page_titles = {
+            "overview": ("Dashboard Overview", "Live participation analytics and candidate performance."),
+            "candidates": ("Candidate Management", "Add, modify, or remove election candidates."),
+            "voters": ("Voter Directory", "Search registered voters and check balloting statuses."),
+            "election": ("Election Controls", "Toggle voting access, results visibility, or reset ledger."),
+        }
+        page_title, page_subtitle = page_titles.get(tab, page_titles["overview"])
+        self.label(title_block, page_title, 23, TEXT, True, bg=BG).pack(anchor="w", pady=(4, 2))
+        self.label(title_block, page_subtitle, 10, MUTED, bg=BG).pack(anchor="w")
+
+        status_color = GREEN if is_election_open() else RED
+        status_text = "●  ELECTION OPEN" if is_election_open() else "●  ELECTION CLOSED"
+        status = tk.Label(header, text=status_text, bg=PANEL, fg=status_color,
+                          font=(FONT, 9, "bold"), padx=13, pady=9,
+                          highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+        status.pack(side="right", anchor="ne", pady=(8, 0))
+
+        body = tk.Frame(workspace, bg=BG)
+        body.pack(fill="both", expand=True)
+        if tab == "overview":
+            self.admin_overview(body)
+        elif tab == "candidates":
+            self.admin_candidates(body)
+        elif tab == "voters":
+            self.admin_voters(body)
+        else:
+            self.admin_election(body)
+
+    def admin_overview(self, parent):
+        st = get_stats()
+        tiles = tk.Frame(parent, bg=BG)
+        tiles.pack(fill="x", pady=(0, 14))
+        for title, value, color in [
+            ("REGISTERED VOTERS", st["total"], PURPLE),
+            ("VOTES CAST", st["voted"], GREEN),
+            ("YET TO VOTE", st["remaining"], CORAL),
+            ("TURNOUT", f"{st['turnout']:.0f}%", CYAN),
+        ]:
+            tile = tk.Frame(tiles, bg=PANEL, highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+            tile.pack(side="left", fill="x", expand=True, padx=5)
+            tk.Frame(tile, bg=color, height=4).pack(fill="x")
+            self.label(tile, title, 9, MUTED, True, bg=PANEL).pack(anchor="w", padx=14, pady=(13, 5))
+            self.label(tile, str(value), 23, color, True, bg=PANEL).pack(anchor="w", padx=14, pady=(0, 14))
+
+        box = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground=BORDER_SUBTLE)
+        box.pack(fill="both", expand=True)
+        self.label(box, "Candidate Standings", 14, TEXT, True, bg=PANEL).pack(anchor="w", padx=16, pady=(14, 0))
+        chart = tk.Canvas(box, bg=PANEL, highlightthickness=0)
+        chart.pack(fill="both", expand=True, padx=12, pady=10)
+        items = [(name, votes, CANDIDATE_COLORS[i % len(CANDIDATE_COLORS)])
+                 for i, (_, name, party, votes) in enumerate(st["candidates"])]
+        chart.bind("<Configure>", lambda e: self.draw_bar_chart(chart, items))
+
+    def admin_candidates(self, parent):
+        left = tk.Frame(parent, bg=PANEL, padx=18, pady=18)
+        left.pack(side="left", fill="y", padx=(0, 14))
+        self.label(left, "Candidate Details", 14, TEXT, True, bg=PANEL).pack(anchor="w", pady=(0, 14))
+
+        self.label(left, "FULL NAME", 9, CYAN, True, bg=PANEL).pack(anchor="w")
+        wrap, self.c_name = self.entry(left)
+        wrap.pack(fill="x", pady=(4, 10))
+
+        self.label(left, "PARTY / AFFILIATION", 9, CYAN, True, bg=PANEL).pack(anchor="w")
+        wrap, self.c_party = self.entry(left)
+        wrap.pack(fill="x", pady=(4, 14))
+
+        self.candidate_selected = None
+        buttons = tk.Frame(left, bg=PANEL)
+        buttons.pack(fill="x")
+        self.button(buttons, "Add", self.candidate_add, SKYBLUE).grid(row=0, column=0, padx=3, pady=3, sticky="ew")
+        self.button(buttons, "Update", self.candidate_update, CYAN).grid(row=0, column=1, padx=3, pady=3, sticky="ew")
+        self.button(buttons, "Delete", self.candidate_delete, RED).grid(row=1, column=0, padx=3, pady=3, sticky="ew")
+        self.button(buttons, "Clear", self.candidate_clear, FIELD).grid(row=1, column=1, padx=3, pady=3, sticky="ew")
+        buttons.grid_columnconfigure(0, weight=1)
+        buttons.grid_columnconfigure(1, weight=1)
+
+        right = tk.Frame(parent, bg=BG)
+        right.pack(side="left", fill="both", expand=True)
+        columns = ("id", "name", "party", "votes")
+        self.c_tree = ttk.Treeview(right, columns=columns, show="headings", style="SV.Treeview")
+        for col, title, width in [("id", "ID", 45), ("name", "Candidate Name", 180),
+                                  ("party", "Party", 160), ("votes", "Votes", 70)]:
+            self.c_tree.heading(col, text=title)
+            self.c_tree.column(col, width=width, anchor="w")
+        self.c_tree.pack(fill="both", expand=True)
+        self.c_tree.bind("<<TreeviewSelect>>", self.candidate_pick)
+        self.refresh_candidates()
+
+    def refresh_candidates(self):
+        if not hasattr(self, "c_tree") or not self.c_tree.winfo_exists():
             return
-        self.admin_msg.config(text=text, fg=color)
-        if self.flash_job:
-            self.after_cancel(self.flash_job)
-        self.flash_job = self.after(3500, self._admin_unflash)
-
-    def _admin_unflash(self):
-        self.flash_job = None
-        if self.admin_msg is not None and self.admin_msg.winfo_exists():
-            self.admin_msg.config(text="")
-
-    def stat_tile(self, parent, col, cap, value, color):
-        box = tk.Frame(parent, bg=FIELD, highlightthickness=1, highlightbackground=BORDER)
-        box.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0))
-        parent.grid_columnconfigure(col, weight=1, uniform="tile")
-        tk.Frame(box, bg=color, height=4).pack(fill="x")
-        tk.Label(box, text=cap, fg=MUTED, bg=FIELD, font=CAPTION).pack(anchor="w", padx=16, pady=(12, 0))
-        tk.Label(box, text=value, fg=color, bg=FIELD, font=(FONT, 24, "bold")
-                 ).pack(anchor="w", padx=16, pady=(0, 14))
-
-    # ----- Overview -----
-    def admin_overview(self):
-        st = election_stats()
-        body = self.admin_body
-        row = tk.Frame(body, bg=CARD)
-        row.pack(fill="x")
-        self.stat_tile(row, 0, "REGISTERED VOTERS", str(st["total"]), VIOLET)
-        self.stat_tile(row, 1, "VOTES CAST", str(st["voted"]), MINT)
-        self.stat_tile(row, 2, "YET TO VOTE", str(st["remaining"]), AMBER)
-        self.stat_tile(row, 3, "TURNOUT", f"{st['turnout']:.0f}%", CYAN)
-
-        lower = tk.Frame(body, bg=CARD)
-        lower.pack(fill="both", expand=True, pady=(14, 0))
-        lower.grid_columnconfigure(0, weight=3, uniform="o")
-        lower.grid_columnconfigure(1, weight=2, uniform="o")
-        lower.grid_rowconfigure(0, weight=1)
-
-        left = tk.Frame(lower, bg=FIELD, highlightthickness=1, highlightbackground=BORDER)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        tk.Label(left, text="Votes by candidate", fg=TEXT, bg=FIELD, font=H2
-                 ).pack(anchor="w", padx=18, pady=(14, 0))
-        c = tk.Canvas(left, bg=FIELD, highlightthickness=0)
-        c.pack(fill="both", expand=True, padx=12, pady=10)
-        items = [(n, v, CAND_COLORS[i % len(CAND_COLORS)]) for i, (_, n, _, v) in enumerate(st["cands"])]
-        top = max([v for _, v, _ in items], default=0)
-        c.bind("<Configure>", lambda e: draw_hbars(c, items, e.width, e.height, top))
-
-        right = tk.Frame(lower, bg=FIELD, highlightthickness=1, highlightbackground=BORDER)
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        tk.Label(right, text="Election status", fg=TEXT, bg=FIELD, font=H2
-                 ).pack(anchor="w", padx=18, pady=(14, 8))
-        is_open = election_open()
-        chip(right, "●  OPEN" if is_open else "●  CLOSED",
-             MINT if is_open else DANGER, bg=CARD).pack(anchor="w", padx=18)
-        public = get_setting("results_public", "1") == "1"
-        tk.Label(right, text=f"Candidates: {len(st['cands'])}\nResults public: "
-                 f"{'Yes' if public else 'No'}", fg=MUTED, bg=FIELD, font=BODY, justify="left"
-                 ).pack(anchor="w", padx=18, pady=12)
-        GradButton(right, "Open Results Dashboard", self.show_results, width=240, height=42,
-                   stops=(CYAN, VIOLET), bg=FIELD, size=12).pack(anchor="w", padx=18, pady=(0, 6))
-        GradButton(right, "Manage Election", lambda: self.show_admin("election"), width=240,
-                   height=42, stops=(VIOLET, PINK), bg=FIELD, size=12).pack(anchor="w", padx=18)
-
-    # ----- Candidates -----
-    def admin_candidates(self):
-        body = self.admin_body
-        locked = election_stats()["votes"] > 0
-        form = tk.Frame(body, bg=FIELD, highlightthickness=1, highlightbackground=BORDER, width=280)
-        form.pack(side="left", fill="y", padx=(0, 14))
-        form.pack_propagate(False)
-        inner = tk.Frame(form, bg=CARD)
-        inner.pack(fill="both", expand=True, padx=18, pady=14)
-        tk.Label(inner, text="Candidate details", fg=TEXT, bg=CARD, font=H2).pack(anchor="w")
-        caption(inner, "FULL NAME")
-        wrap, self.c_name = make_entry(inner, size=13)
-        wrap.pack(fill="x")
-        caption(inner, "PARTY")
-        wrap, self.c_party = make_entry(inner, size=13)
-        wrap.pack(fill="x")
-        self.c_sel = None
-
-        grid = tk.Frame(inner, bg=CARD)
-        grid.pack(pady=(18, 0))
-        for i, (txt, cmd, stops) in enumerate([
-                ("Add", self.cand_add, (VIOLET, PINK)), ("Update", self.cand_update, (CYAN, VIOLET)),
-                ("Delete", self.cand_delete, (PINK, "#be123c")), ("Clear", self.cand_clear, (FIELD, "#1f2866"))]):
-            GradButton(grid, txt, cmd, width=100, height=38, stops=stops, size=12
-                       ).grid(row=i // 2, column=i % 2, padx=4, pady=4)
-        if locked:
-            tk.Label(inner, text="Votes already cast: adding or\ndeleting candidates is locked.\n"
-                     "Reset the election to change\nthe candidate list.", fg=AMBER, bg=CARD,
-                     font=SMALL, justify="left").pack(anchor="w", pady=(12, 0))
-
-        frame, self.c_tree = make_tree(body, ("id", "name", "party", "votes"),
-                                       ["ID", "Name", "Party", "Votes"], [50, 200, 170, 70])
-        frame.pack(side="left", fill="both", expand=True)
-        self.c_tree.bind("<<TreeviewSelect>>", self.cand_select)
-        self.cand_refresh()
-
-    def cand_refresh(self):
         self.c_tree.delete(*self.c_tree.get_children())
-        for cid, name, party, votes in q("SELECT id, name, party, votes FROM candidates ORDER BY id"):
+        for cid, name, party, votes in db_query("SELECT id, name, party, votes FROM candidates ORDER BY id"):
             self.c_tree.insert("", "end", iid=str(cid), values=(cid, name, party, votes))
 
-    def cand_select(self, event=None):
-        sel = self.c_tree.selection()
-        if not sel:
+    def candidate_pick(self, event=None):
+        selection = self.c_tree.selection()
+        if not selection:
             return
-        self.c_sel = int(sel[0])
-        v = self.c_tree.item(sel[0], "values")
+        self.candidate_selected = int(selection[0])
+        values = self.c_tree.item(selection[0], "values")
         self.c_name.delete(0, tk.END)
-        self.c_name.insert(0, v[1])
+        self.c_name.insert(0, values[1])
         self.c_party.delete(0, tk.END)
-        self.c_party.insert(0, v[2])
+        self.c_party.insert(0, values[2])
 
-    def cand_clear(self):
-        self.c_sel = None
+    def candidate_clear(self):
+        self.candidate_selected = None
         self.c_name.delete(0, tk.END)
         self.c_party.delete(0, tk.END)
-        if self.c_tree.selection():
-            self.c_tree.selection_remove(self.c_tree.selection())
 
-    def cand_values(self):
-        name, party = self.c_name.get().strip(), self.c_party.get().strip()
+    def candidate_values(self):
+        name = self.c_name.get().strip()
+        party = self.c_party.get().strip()
         if not name or not party:
-            self.notify("Missing details", "Please enter both a name and a party.")
+            messagebox.showwarning("Missing Fields", "Please enter both candidate name and party.")
             return None
         return name, party
 
-    def cand_add(self):
-        if election_stats()["votes"] > 0:
-            self.notify("Election in progress", "Votes have been cast, so candidates "
-                        "can't be added. Reset the election first.", DANGER, "✕")
+    def candidate_add(self):
+        if get_stats()["votes"]:
+            messagebox.showwarning("Election Active", "Reset the election before modifying candidates while votes are recorded.")
             return
-        vals = self.cand_values()
-        if vals:
-            if len(q("SELECT id FROM candidates")) >= len(CAND_COLORS):
-                self.notify("Limit reached", f"You can have up to {len(CAND_COLORS)} candidates.")
-                return
-            ex("INSERT INTO candidates (name, party) VALUES (?, ?)", vals)
-            self.cand_clear()
-            self.cand_refresh()
-            self.admin_flash("Candidate added")
+        values = self.candidate_values()
+        if values:
+            db_execute("INSERT INTO candidates(name, party, votes) VALUES (?, ?, 0)", values)
+            self.refresh_candidates()
+            self.candidate_clear()
 
-    def cand_update(self):
-        if self.c_sel is None:
-            self.notify("Select a candidate", "Click a candidate in the table first.")
+    def candidate_update(self):
+        if self.candidate_selected is None:
+            messagebox.showwarning("Select Candidate", "Please select a candidate in the table first.")
             return
-        vals = self.cand_values()
-        if vals:
-            ex("UPDATE candidates SET name=?, party=? WHERE id=?", vals + (self.c_sel,))
-            self.cand_refresh()
-            self.admin_flash("Candidate updated")
+        values = self.candidate_values()
+        if values:
+            db_execute("UPDATE candidates SET name=?, party=? WHERE id=?", values + (self.candidate_selected,))
+            self.refresh_candidates()
 
-    def cand_delete(self):
-        if self.c_sel is None:
-            self.notify("Select a candidate", "Click a candidate in the table first.")
+    def candidate_delete(self):
+        if self.candidate_selected is None:
+            messagebox.showwarning("Select Candidate", "Please select a candidate in the table first.")
             return
-        if election_stats()["votes"] > 0:
-            self.notify("Election in progress", "Votes have been cast, so candidates "
-                        "can't be deleted. Reset the election first.", DANGER, "✕")
+        if get_stats()["votes"]:
+            messagebox.showwarning("Election Active", "Reset election before removing candidates after votes have been cast.")
             return
-        if self.ask("Delete candidate", "Delete this candidate?", "This cannot be undone.",
-                    "Delete", "Cancel", DANGER, "!"):
-            ex("DELETE FROM candidates WHERE id=?", (self.c_sel,))
-            self.cand_clear()
-            self.cand_refresh()
-            self.admin_flash("Candidate deleted", DANGER)
+        if messagebox.askyesno("Delete Candidate", "Are you sure you want to delete the selected candidate?"):
+            db_execute("DELETE FROM candidates WHERE id=?", (self.candidate_selected,))
+            self.refresh_candidates()
+            self.candidate_clear()
 
-    # ----- Voters -----
-    def admin_voters(self):
-        body = self.admin_body
-        form = tk.Frame(body, bg=FIELD, highlightthickness=1, highlightbackground=BORDER, width=280)
-        form.pack(side="left", fill="y", padx=(0, 14))
-        form.pack_propagate(False)
-        inner = tk.Frame(form, bg=CARD)
-        inner.pack(fill="both", expand=True, padx=18, pady=14)
-        tk.Label(inner, text="Voter details", fg=TEXT, bg=CARD, font=H2).pack(anchor="w")
-        self.v_sel = None
-        self.v_fields = {}
-        for key, label in (("id", "VOTER ID"), ("name", "FULL NAME"), ("pw", "PASSWORD")):
-            caption(inner, label, pady=(8, 3))
-            wrap, ent = make_entry(inner, size=13)
-            wrap.pack(fill="x")
-            self.v_fields[key] = ent
-        grid = tk.Frame(inner, bg=CARD)
-        grid.pack(pady=(14, 0))
-        for i, (txt, cmd, stops) in enumerate([
-                ("Add", self.voter_add, (VIOLET, PINK)), ("Update", self.voter_update, (CYAN, VIOLET)),
-                ("Delete", self.voter_delete, (PINK, "#be123c")), ("Clear", self.voter_clear, (FIELD, "#1f2866"))]):
-            GradButton(grid, txt, cmd, width=100, height=38, stops=stops, size=12
-                       ).grid(row=i // 2, column=i % 2, padx=4, pady=4)
+    def admin_voters(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", pady=(0, 10))
+        self.label(top, "Registered Voters Directory", 15, TEXT, True, bg=BG).pack(side="left")
 
-        right = tk.Frame(body, bg=CARD)
-        right.pack(side="left", fill="both", expand=True)
-        top = tk.Frame(right, bg=CARD)
-        top.pack(fill="x", pady=(0, 8))
-        tk.Label(top, text="Search", fg=CYAN, bg=CARD, font=CAPTION).pack(side="left", padx=(0, 10))
         self.v_search = tk.StringVar()
-        wrap, _ = make_entry(top, size=12, var=self.v_search)
-        wrap.pack(side="left", fill="x", expand=True)
-        frame, self.v_tree = make_tree(right, ("id", "name", "status"),
-                                       ["Voter ID", "Name", "Status"], [100, 240, 120])
-        frame.pack(fill="both", expand=True)
-        self.v_tree.tag_configure("voted", foreground=MINT)
-        self.v_tree.tag_configure("pending", foreground=AMBER)
-        self.v_tree.bind("<<TreeviewSelect>>", self.voter_select)
-        self.v_search.trace_add("write", lambda *a: self.voter_refresh())
-        self.voter_refresh()
+        self.v_search_entry = tk.Entry(top, textvariable=self.v_search, bg=FIELD, fg=TEXT,
+                                       insertbackground=CYAN, relief="flat", font=(FONT, 11))
+        self.v_search_entry.pack(side="right", ipady=7, ipadx=10)
+        self.label(top, "🔍 Search: ", 10, MUTED, False, bg=BG).pack(side="right", padx=(0, 6))
+        self.v_search.trace_add("write", lambda *args: self.refresh_voters())
 
-    def voter_refresh(self):
-        if not self.v_tree.winfo_exists():
+        cols = ("id", "name", "status")
+        self.v_tree = ttk.Treeview(parent, columns=cols, show="headings", style="SV.Treeview")
+        for col, title, width in [("id", "Voter ID", 130), ("name", "Full Name", 240), ("status", "Ballot Status", 160)]:
+            self.v_tree.heading(col, text=title)
+            self.v_tree.column(col, width=width, anchor="w")
+        self.v_tree.pack(fill="both", expand=True)
+        self.refresh_voters()
+
+    def refresh_voters(self):
+        if not hasattr(self, "v_tree") or not self.v_tree.winfo_exists():
             return
         term = self.v_search.get().strip().lower()
         self.v_tree.delete(*self.v_tree.get_children())
-        for vid, name, voted in q("SELECT voter_id, name, has_voted FROM voters ORDER BY voter_id"):
-            if term and term not in f"{vid} {name}".lower():
+        for voter_id, name, voted in db_query("SELECT voter_id, name, has_voted FROM voters ORDER BY voter_id"):
+            if term and term not in f"{voter_id} {name}".lower():
                 continue
-            self.v_tree.insert("", "end", iid=vid, tags=("voted" if voted else "pending",),
-                               values=(vid, name, "Voted" if voted else "Pending"))
+            self.v_tree.insert("", "end", values=(voter_id, name, "✓ Voted" if voted else "○ Pending"))
 
-    def voter_select(self, event=None):
-        sel = self.v_tree.selection()
-        if not sel:
-            return
-        self.v_sel = sel[0]
-        rows = q("SELECT voter_id, name, password FROM voters WHERE voter_id=?", (self.v_sel,))
-        if not rows:
-            return
-        for key, val in zip(("id", "name", "pw"), rows[0]):
-            self.v_fields[key].delete(0, tk.END)
-            self.v_fields[key].insert(0, val)
-
-    def voter_clear(self):
-        self.v_sel = None
-        for ent in self.v_fields.values():
-            ent.delete(0, tk.END)
-        if self.v_tree.selection():
-            self.v_tree.selection_remove(self.v_tree.selection())
-
-    def voter_values(self):
-        vid = self.v_fields["id"].get().strip().upper()
-        name = self.v_fields["name"].get().strip()
-        pw = self.v_fields["pw"].get().strip()
-        if not vid or not name or not pw:
-            self.notify("Missing details", "Voter ID, name and password are all required.")
-            return None
-        return vid, name, pw
-
-    def voter_add(self):
-        vals = self.voter_values()
-        if not vals:
-            return
-        try:
-            ex("INSERT INTO voters (voter_id, name, password, has_voted) VALUES (?,?,?,0)", vals)
-        except sqlite3.IntegrityError:
-            self.notify("Duplicate ID", f"Voter ID {vals[0]} already exists.", DANGER, "✕")
-            return
-        self.voter_clear()
-        self.voter_refresh()
-        self.admin_flash("Voter added")
-
-    def voter_update(self):
-        if self.v_sel is None:
-            self.notify("Select a voter", "Click a voter in the table first.")
-            return
-        vals = self.voter_values()
-        if vals:
-            ex("UPDATE voters SET name=?, password=? WHERE voter_id=?", (vals[1], vals[2], self.v_sel))
-            self.voter_refresh()
-            self.admin_flash("Voter updated (ID can't be changed)")
-
-    def voter_delete(self):
-        if self.v_sel is None:
-            self.notify("Select a voter", "Click a voter in the table first.")
-            return
-        rows = q("SELECT has_voted FROM voters WHERE voter_id=?", (self.v_sel,))
-        if rows and rows[0][0]:
-            self.notify("Voter has voted", "A voter who has already voted can't be "
-                        "deleted, as it would break the vote count.", DANGER, "✕")
-            return
-        if self.ask("Delete voter", "Delete this voter?", "This cannot be undone.",
-                    "Delete", "Cancel", DANGER, "!"):
-            ex("DELETE FROM voters WHERE voter_id=?", (self.v_sel,))
-            self.voter_clear()
-            self.voter_refresh()
-            self.admin_flash("Voter deleted", DANGER)
-
-    # ----- Election controls -----
-    def admin_election(self):
-        body = self.admin_body
-        body.grid_columnconfigure(0, weight=1, uniform="e")
-        body.grid_columnconfigure(1, weight=1, uniform="e")
-        body.grid_rowconfigure(0, weight=1, uniform="e")
-        body.grid_rowconfigure(1, weight=1, uniform="e")
-
-        def panel(r, c, title, text, color=BORDER):
-            box = tk.Frame(body, bg=FIELD, highlightthickness=2, highlightbackground=color)
-            box.grid(row=r, column=c, sticky="nsew", padx=(0 if c == 0 else 8, 0 if c == 1 else 8),
-                     pady=(0 if r == 0 else 8, 0 if r == 1 else 8))
-            tk.Label(box, text=title, fg=TEXT, bg=FIELD, font=H2).pack(anchor="w", padx=20, pady=(16, 2))
-            tk.Label(box, text=text, fg=MUTED, bg=FIELD, font=SMALL, justify="left", wraplength=330
-                     ).pack(anchor="w", padx=20)
-            return box
-
-        is_open = election_open()
-        box = panel(0, 0, "Voting status",
-                    "Open: voters can log in and vote.\nClosed: voting stops and results become public.")
-        chip(box, "●  OPEN" if is_open else "●  CLOSED", MINT if is_open else DANGER,
-             bg=CARD).pack(anchor="w", padx=20, pady=10)
-        GradButton(box, "Close Election" if is_open else "Reopen Election", self.toggle_election,
-                   width=220, height=42, stops=(PINK, "#be123c") if is_open else (MINT, CYAN),
-                   bg=FIELD, size=12).pack(anchor="w", padx=20)
-
-        public = get_setting("results_public", "1") == "1"
-        box = panel(0, 1, "Results visibility",
-                    "Public: voters can see live results.\nHidden: only you can see them until the election closes.")
-        chip(box, "●  PUBLIC" if public else "●  HIDDEN", MINT if public else AMBER,
-             bg=CARD).pack(anchor="w", padx=20, pady=10)
-        GradButton(box, "Hide Results" if public else "Publish Results", self.toggle_public,
-                   width=220, height=42, stops=(CYAN, VIOLET), bg=FIELD, size=12
-                   ).pack(anchor="w", padx=20)
-
-        box = panel(1, 0, "Export", "Open the results dashboard and download the final "
-                    "tally as a CSV file.")
-        GradButton(box, "Open Results Dashboard", self.show_results, width=240, height=42,
-                   stops=(VIOLET, PINK), bg=FIELD, size=12).pack(anchor="w", padx=20, pady=(14, 0))
-
-        box = panel(1, 1, "Danger zone", "Reset sets every vote to zero and lets all voters "
-                    "vote again. Use it before a new election.", DANGER)
-        GradButton(box, "Reset Election", self.reset_election, width=220, height=42,
-                   stops=(DANGER, "#be123c"), bg=FIELD, size=12).pack(anchor="w", padx=20, pady=(14, 0))
+    def admin_election(self, parent):
+        status = "OPEN" if is_election_open() else "CLOSED"
+        public = setting("results_public", "1") == "1"
+        cards = [
+            ("Election Availability", f"Voting is currently {status}.",
+             "Close Voting Access" if is_election_open() else "Reopen Voting Access", self.toggle_election, PURPLE),
+            ("Results Visibility", "Control whether non-admin voters can view live election results.",
+             "Hide Public Results" if public else "Publish Results", self.toggle_results, CYAN),
+            ("Audit Data Export", "Save candidate vote counts, participation stats, and turnout to CSV.",
+             "Export Audit CSV", self.export_results, GREEN),
+            ("Reset Entire Election", "Reset all candidate votes to zero and restore voting eligibility for all voters.",
+             "Reset Election Data", self.reset_election, RED),
+        ]
+        for i, (title, desc, button_text, command, color) in enumerate(cards):
+            box = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground=BORDER_SUBTLE, padx=20, pady=18)
+            box.grid(row=i // 2, column=i % 2, sticky="nsew", padx=6, pady=6)
+            self.label(box, title, 14, TEXT, True, bg=PANEL).pack(anchor="w")
+            self.label(box, desc, 10, MUTED, wraplength=310, justify="left", bg=PANEL).pack(anchor="w", pady=(8, 18))
+            self.button(box, button_text, command, color).pack(anchor="w")
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
 
     def toggle_election(self):
-        if election_open():
-            if not self.ask("Close election", "Close the election?",
-                            "Voters will no longer be able to vote and the results "
-                            "will become public.", "Close Election", "Cancel", PINK, "!"):
+        if is_election_open():
+            if not messagebox.askyesno("Close Election", "Close voting now? Results will automatically become public."):
                 return
             set_setting("election_open", "0")
+            set_setting("results_public", "1")
         else:
+            if not messagebox.askyesno("Reopen Election", "Reopen voting for registered voters who haven't voted yet?"):
+                return
             set_setting("election_open", "1")
         self.show_admin("election")
-        self.admin_flash("Election status updated")
 
-    def toggle_public(self):
-        set_setting("results_public", "0" if get_setting("results_public", "1") == "1" else "1")
+    def toggle_results(self):
+        current = setting("results_public", "1") == "1"
+        set_setting("results_public", "0" if current else "1")
         self.show_admin("election")
-        self.admin_flash("Results visibility updated")
 
     def reset_election(self):
-        if not self.ask("Reset election", "Reset the whole election?",
-                        "All votes will be erased and every voter can vote again. "
-                        "This cannot be undone.", "Reset", "Cancel", DANGER, "!",
-                        require_text="RESET"):
+        if not messagebox.askyesno("Reset Election", "This resets all cast votes and allows all voters to vote again. Continue?"):
             return
-        con = get_db()
-        con.execute("UPDATE candidates SET votes = 0")
-        con.execute("UPDATE voters SET has_voted = 0")
-        con.commit()
-        con.close()
+        if not messagebox.askyesno("Final Confirmation", "Are you absolutely certain? This cannot be undone."):
+            return
+        con = connect_db()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("UPDATE candidates SET votes=0")
+            con.execute("UPDATE voters SET has_voted=0")
+            con.commit()
+        except sqlite3.Error as exc:
+            con.rollback()
+            messagebox.showerror("Reset Failed", str(exc))
+            return
+        finally:
+            con.close()
         set_setting("election_open", "1")
         self.show_admin("election")
-        self.admin_flash("Election has been reset", AMBER)
 
 
 if __name__ == "__main__":
     setup_database()
-    app = VotingApp()
+    app = SecureVote()
     app.mainloop()
